@@ -146,23 +146,42 @@ export class BridgeClient {
    * @param {AbortSignal} [signal]
    * @param {number} [timeoutMs]
    * @param {(ev: object) => void} [onEvent] called as each SSE event arrives
+   * @param {{
+   *   isTerminal?: (ev: object, state: { awaitingToolExec: Set<string> }) => boolean,
+   * }} [opts]
    */
-  async collectUntilTerminal(signal, timeoutMs = 15000, onEvent) {
+  async collectUntilTerminal(signal, timeoutMs = 15000, onEvent, opts = {}) {
     const out = [];
+    const awaitingToolExec = new Set();
+    let sawRunFinished = false;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const onAbort = () => ac.abort();
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    const defaultTerminal = (ev) => {
+      const t = ev?.type;
+      if (t === "run_error" || t === "session_end") return true;
+      if (t === "run_finished") {
+        sawRunFinished = true;
+        return awaitingToolExec.size === 0;
+      }
+      // Late tool_executed after run_finished (upload race).
+      if (sawRunFinished && awaitingToolExec.size === 0) return true;
+      return false;
+    };
+    const isTerminal = opts.isTerminal || defaultTerminal;
     try {
       for await (const ev of this.events(ac.signal)) {
         out.push(ev);
+        if (ev?.type === "tool_call") {
+          const id = typeof ev.call_id === "string" ? ev.call_id : "";
+          if (id) awaitingToolExec.add(id);
+        } else if (ev?.type === "tool_executed") {
+          const id = typeof ev.call_id === "string" ? ev.call_id : "";
+          if (id) awaitingToolExec.delete(id);
+        }
         if (typeof onEvent === "function") onEvent(ev);
-        const t = ev?.type;
-        if (
-          t === "run_finished" ||
-          t === "run_error" ||
-          t === "session_end"
-        ) {
+        if (isTerminal(ev, { awaitingToolExec })) {
           break;
         }
       }
