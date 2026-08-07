@@ -6,25 +6,45 @@
  * Also holds deferred assistant text for a follow-up stream turn so the TUI
  * shows tools above the final answer (pi always paints text above tool blocks
  * within a single assistant message).
+ *
+ * State lives on globalThis (Symbol.for) so jiti/static vs dynamic imports of
+ * this module still share one Map — otherwise stash writes land in one
+ * instance and shadow-tool execute reads an empty one → "No bridge result".
  */
 
-/** @type {Map<string, { ok: boolean, content: unknown, name?: string }>} */
-const stash = new Map();
+/**
+ * @typedef {{ ok: boolean, content: unknown, name?: string, displayName?: string }} Stashed
+ */
 
-/** FIFO of call ids per display name when wire call_id is missing/mismatched. */
-/** @type {Map<string, string[]>} */
-const idsByName = new Map();
+const STATE_KEY = Symbol.for("pi-cursor-remote.result-stash.v1");
 
-/** @type {string | null} */
-let followUpText = null;
+/**
+ * @returns {{
+ *   stash: Map<string, Stashed>,
+ *   idsByName: Map<string, string[]>,
+ *   followUpText: string | null,
+ * }}
+ */
+function state() {
+  const g = globalThis;
+  if (!g[STATE_KEY]) {
+    g[STATE_KEY] = {
+      stash: new Map(),
+      idsByName: new Map(),
+      followUpText: null,
+    };
+  }
+  return g[STATE_KEY];
+}
 
 /**
  * @param {string} callId
- * @param {{ ok: boolean, content: unknown, name?: string }} result
+ * @param {Stashed} result
  */
 export function stashToolResult(callId, result) {
   if (!callId) return;
-  stash.set(callId, result);
+  const s = state();
+  s.stash.set(callId, result);
 }
 
 /**
@@ -34,10 +54,11 @@ export function stashToolResult(callId, result) {
  */
 export function trackCallId(displayName, callId) {
   if (!displayName || !callId) return;
-  let q = idsByName.get(displayName);
+  const s = state();
+  let q = s.idsByName.get(displayName);
   if (!q) {
     q = [];
-    idsByName.set(displayName, q);
+    s.idsByName.set(displayName, q);
   }
   q.push(callId);
 }
@@ -45,61 +66,77 @@ export function trackCallId(displayName, callId) {
 /**
  * @param {string} callId
  * @param {string} [displayName]
- * @returns {{ ok: boolean, content: unknown, name?: string } | undefined}
+ * @returns {Stashed | undefined}
  */
 export function takeToolResult(callId, displayName) {
-  if (callId && stash.has(callId)) {
-    const v = stash.get(callId);
-    stash.delete(callId);
+  const s = state();
+  if (callId && s.stash.has(callId)) {
+    const v = s.stash.get(callId);
+    s.stash.delete(callId);
     return v;
   }
   if (displayName) {
-    const q = idsByName.get(displayName);
+    const q = s.idsByName.get(displayName);
     while (q && q.length) {
       const id = q.shift();
-      if (id && stash.has(id)) {
-        const v = stash.get(id);
-        stash.delete(id);
+      if (id && s.stash.has(id)) {
+        const v = s.stash.get(id);
+        s.stash.delete(id);
+        return v;
+      }
+    }
+    // Match by stashed displayName / wire name (module-split or id rewrite).
+    for (const [id, v] of s.stash) {
+      const dn = v.displayName || (v.name ? stripContour(v.name) : "");
+      if (dn === displayName) {
+        s.stash.delete(id);
         return v;
       }
     }
   }
-  // Last resort: any remaining stashed result
-  if (stash.size === 1) {
-    const [id, v] = stash.entries().next().value;
-    stash.delete(id);
+  if (s.stash.size === 1) {
+    const [id, v] = s.stash.entries().next().value;
+    s.stash.delete(id);
     return v;
   }
   return undefined;
 }
 
+/** @param {string} wireName */
+function stripContour(wireName) {
+  return wireName.startsWith("contour__") ? wireName.slice("contour__".length) : wireName;
+}
+
 /** @param {string} callId */
 export function peekToolResult(callId) {
-  return stash.get(callId);
+  return state().stash.get(callId);
 }
 
 export function clearToolResults() {
-  stash.clear();
-  idsByName.clear();
+  const s = state();
+  s.stash.clear();
+  s.idsByName.clear();
 }
 
 /** @param {string} text */
 export function setFollowUpText(text) {
-  followUpText = typeof text === "string" && text.trim() ? text : null;
+  state().followUpText = typeof text === "string" && text.trim() ? text : null;
 }
 
 /** @returns {string | null} */
 export function takeFollowUpText() {
-  const t = followUpText;
-  followUpText = null;
+  const s = state();
+  const t = s.followUpText;
+  s.followUpText = null;
   return t;
 }
 
 /** @returns {boolean} */
 export function hasFollowUpText() {
-  return followUpText != null && followUpText.length > 0;
+  const t = state().followUpText;
+  return t != null && t.length > 0;
 }
 
 export function peekFollowUpText() {
-  return followUpText;
+  return state().followUpText;
 }

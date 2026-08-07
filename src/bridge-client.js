@@ -10,6 +10,13 @@
 
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { displayToolName } from "./tool-display.js";
+import {
+  stashToolResult,
+  clearToolResults,
+  trackCallId,
+  setFollowUpText,
+} from "./result-stash.js";
 
 /**
  * @typedef {object} BridgeClientOptions
@@ -389,14 +396,6 @@ export function emptyUsage() {
  * }} [opts]
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
-  const { displayToolName } = await import("./tool-display.js");
-  const {
-    stashToolResult,
-    clearToolResults,
-    trackCallId,
-    setFollowUpText,
-  } = await import("./result-stash.js");
-
   clearToolResults();
   setFollowUpText("");
 
@@ -546,15 +545,14 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       const callId = typeof ev.call_id === "string" ? ev.call_id : "";
       const wireName = typeof ev.name === "string" ? ev.name : "";
       const display = displayToolName(wireName || "tool");
-      let id = callId;
-      if (!id) {
-        id = `exec-${Date.now().toString(36)}-${stashSizeApprox()}`;
-        trackCallId(display, id);
-      }
+      const id =
+        callId || `exec-${Date.now().toString(36)}-${stashSizeApprox()}`;
+      trackCallId(display, id);
       stashToolResult(id, {
         ok: ev.ok !== false,
         content: ev.content,
         name: wireName || undefined,
+        displayName: display,
       });
     } else if (ev.type === "run_finished") {
       output.stopReason = sawToolCall ? "toolUse" : "stop";

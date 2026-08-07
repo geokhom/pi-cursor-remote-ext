@@ -20,6 +20,8 @@
 import { BridgeClient, runPromptViaBridge, grantsFromEnv, emptyUsage } from "./bridge-client.js";
 import { resolveBridgeConnection, loadConfig } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
+import { takeFollowUpText } from "./result-stash.js";
+import { displayToolNames } from "./tool-display.js";
 
 function lastUserText(context) {
   const messages = context?.messages || [];
@@ -88,14 +90,12 @@ function streamSimple(model, context, options) {
       // (agent-loop snapshots tools at turn start — mid-stream setActiveTools is too late
       // for THIS turn's execute, but helps the next turn / follow-ups).
       if (_piRef && typeof _piRef.setActiveTools === "function") {
-        const { displayToolNames } = await import("./tool-display.js");
         const shadow = displayToolNames();
         const cur = _piRef.getActiveTools?.() || [];
         const merged = [...new Set([...cur.filter((n) => !shadow.includes(n)), ...shadow])];
         _piRef.setActiveTools(merged);
       }
 
-      const { takeFollowUpText } = await import("./result-stash.js");
       const followUp = takeFollowUpText();
       if (followUp != null) {
         // Second turn after shadow tools: final answer below tool panels.
