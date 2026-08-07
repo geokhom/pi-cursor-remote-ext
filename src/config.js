@@ -19,9 +19,9 @@ export const THINKING_DISPLAY_DEFAULT = "indicator";
 export const WIRE_STATS_VALUES = new Set(["session", "request"]);
 export const WIRE_STATS_DEFAULT = "session";
 
-/** Cursor SDK model ids (static allowlist; mirrors pi_cursor_wire.constants). */
+/** Cursor SDK model ids (pre-catalog fallback; live list comes from bridge). */
 export const DEFAULT_MODEL = "composer-2.5";
-export const MODEL_VALUES = Object.freeze(["composer-2.5", "auto"]);
+export const MODEL_VALUES = Object.freeze(["composer-2.5", "auto", "auto-smart"]);
 /** @type {ReadonlySet<string>} */
 export const MODEL_VALUE_SET = new Set(MODEL_VALUES);
 
@@ -29,6 +29,7 @@ export const MODEL_VALUE_SET = new Set(MODEL_VALUES);
 export const MODEL_DISPLAY_NAMES = {
   "composer-2.5": "Composer 2.5",
   auto: "Auto",
+  "auto-smart": "Auto (Router)",
 };
 
 /**
@@ -63,16 +64,30 @@ export function coerceWireStats(raw) {
 
 /**
  * @param {unknown} raw
+ * @param {Iterable<string> | null} [knownIds]
  * @returns {string}
  */
-export function coerceModel(raw) {
+export function coerceModel(raw, knownIds = null) {
+  let v = null;
   if (typeof raw === "string") {
-    const v = raw.trim();
-    if (MODEL_VALUE_SET.has(v)) return v;
+    v = raw.trim();
+  } else if (raw && typeof raw === "object" && typeof raw.id === "string") {
+    v = raw.id.trim();
+  }
+  if (!v) return DEFAULT_MODEL;
+  if (knownIds) {
+    const set = knownIds instanceof Set ? knownIds : new Set(knownIds);
+    if (set.has(v)) return v;
     const low = v.toLowerCase();
-    for (const m of MODEL_VALUES) {
-      if (m.toLowerCase() === low) return m;
+    for (const m of set) {
+      if (String(m).toLowerCase() === low) return m;
     }
+    return DEFAULT_MODEL;
+  }
+  if (MODEL_VALUE_SET.has(v)) return v;
+  const low = v.toLowerCase();
+  for (const m of MODEL_VALUES) {
+    if (m.toLowerCase() === low) return m;
   }
   return DEFAULT_MODEL;
 }

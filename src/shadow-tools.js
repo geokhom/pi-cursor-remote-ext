@@ -9,7 +9,7 @@
 
 import { displayToolNames, displayToolName } from "./tool-display.js";
 import { takeToolResult, hasFollowUpText } from "./result-stash.js";
-import { formatToolArgs, formatToolResult } from "./bridge-client.js";
+import { formatToolArgs, formatToolResult, hasActiveLiveRun } from "./bridge-client.js";
 import { MODEL_VALUE_SET } from "./config.js";
 
 /** Loose JSON Schema — accepted by pi's typebox/json validator path. */
@@ -18,6 +18,9 @@ const ANY_OBJECT = {
   properties: {},
   additionalProperties: true,
 };
+
+/** Match stock pi bash preview (last N lines + expand hint). */
+const TOOL_PREVIEW_LINES = 5;
 
 /** CSI / OSC / simple ANSI — stripped for visible width only. */
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
@@ -66,6 +69,22 @@ export function truncateToWidth(text, maxWidth, ellipsis = "…") {
 }
 
 /**
+ * Last-N physical lines (stock bash uses visual wrap; good enough without pi-tui).
+ * @param {string} text
+ * @param {number} maxLines
+ */
+export function truncateToLastLines(text, maxLines) {
+  const lines = String(text ?? "").split("\n");
+  if (lines.length <= maxLines) {
+    return { lines, skipped: 0 };
+  }
+  return {
+    lines: lines.slice(-maxLines),
+    skipped: lines.length - maxLines,
+  };
+}
+
+/**
  * Minimal pi-tui Component — truncates every line to render(width).
  * @param {string[] | (() => string[])} linesOrFn
  */
@@ -110,24 +129,33 @@ function makeShadowTool(displayName) {
             : `$ ${displayName}`;
       return linesComponent([theme.fg("toolTitle", theme.bold(title))]);
     },
-    renderResult(result, _options, theme) {
+    renderResult(result, options, theme) {
       const text = (result?.content || [])
         .filter((c) => c && c.type === "text" && typeof c.text === "string")
         .map((c) => c.text)
         .join("\n");
       if (!text) return linesComponent([]);
       const color = result?.isError ? "error" : "toolOutput";
-      const lines = text.split("\n").map((l) => theme.fg(color, l));
-      // Cap rows so a huge tool dump cannot flood the TUI.
-      const capped = lines.length > 80 ? [...lines.slice(0, 80), theme.fg("muted", "…")] : lines;
-      return linesComponent(capped);
+      const expanded = Boolean(options?.expanded);
+      if (expanded) {
+        const lines = text.split("\n").map((l) => theme.fg(color, l));
+        return linesComponent(lines);
+      }
+      const { lines: preview, skipped } = truncateToLastLines(text, TOOL_PREVIEW_LINES);
+      const styled = preview.map((l) => theme.fg(color, l));
+      if (skipped > 0) {
+        const hint = theme.fg(
+          "muted",
+          `... (${skipped} earlier lines, Ctrl+O to expand)`
+        );
+        return linesComponent(["", hint, ...styled]);
+      }
+      return linesComponent(styled.length ? ["", ...styled] : []);
     },
-    async execute(toolCallId, _params, _signal, _onUpdate, _ctx) {
+    async execute(toolCallId, _params, _signal, onUpdate, _ctx) {
       const stashed = takeToolResult(toolCallId, displayName);
-      // If final assistant text was deferred, let the agent start another stream
-      // turn so the answer appears BELOW the tool panels (pi paints text above
-      // tools within a single assistant message).
-      const terminate = !hasFollowUpText();
+      // Continue the agent loop while live SSE still has turns, or legacy follow-up.
+      const terminate = !hasFollowUpText() && !hasActiveLiveRun();
       if (!stashed) {
         return {
           content: [
@@ -144,12 +172,14 @@ function makeShadowTool(displayName) {
         };
       }
       const body = contentToText(stashed.content);
-      return {
+      const result = {
         content: [{ type: "text", text: body || (stashed.ok ? "(ok)" : "(failed)") }],
         details: { wireName: stashed.name, ok: stashed.ok },
         isError: stashed.ok === false,
         terminate,
       };
+      if (typeof onUpdate === "function") onUpdate(result);
+      return result;
     },
   };
 }
@@ -164,7 +194,11 @@ function isCursorRemoteModel(model) {
     m?.provider === "cursor-remote" ||
     m?.api === "cursor-remote-bridge" ||
     m?.id === "cursor-remote" ||
-    (typeof m?.id === "string" && MODEL_VALUE_SET.has(m.id))
+    (typeof m?.id === "string" &&
+      (MODEL_VALUE_SET.has(m.id) ||
+        m.id.startsWith("composer-") ||
+        m.id.includes("@") ||
+        m.id.includes(":")))
   );
 }
 

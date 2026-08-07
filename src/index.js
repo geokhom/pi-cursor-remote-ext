@@ -17,19 +17,32 @@
  *   BRIDGE_GRANTS / BRIDGE_GRANT_WRITE / BRIDGE_GRANT_SHELL
  */
 
-import { BridgeClient, runPromptViaBridge, grantsFromEnv, emptyUsage } from "./bridge-client.js";
+import {
+  BridgeClient,
+  runPromptViaBridge,
+  resumeBridgeLiveTurn,
+  runPromptViaBridgeComplete,
+  hasActiveLiveRun,
+  grantsFromEnv,
+  emptyUsage,
+} from "./bridge-client.js";
 import {
   resolveBridgeConnection,
   loadConfig,
   coerceModel,
-  MODEL_VALUES,
-  MODEL_DISPLAY_NAMES,
   DEFAULT_MODEL,
 } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
 import { takeFollowUp } from "./result-stash.js";
 import { displayToolNames } from "./tool-display.js";
 import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js";
+import {
+  buildCursorModelSelection,
+  fallbackProviderModels,
+  registerModelItems,
+  resolveModelOrFallback,
+} from "./model-discovery.js";
+import { installGenerationSpeedFooter } from "./generation-speed.js";
 
 function lastUserText(context) {
   const messages = context?.messages || [];
@@ -84,19 +97,45 @@ function createLocalStream() {
   };
 }
 
-/**
- * Ensure shadow tools are active for this stream (model_select may have been skipped).
- * @param {import('./types.js').ExtensionAPI | null} pi
- */
+/** @type {import('./types.js').ExtensionAPI | null} */
 let _piRef = null;
+/** @type {string} */
+let _baseUrl = "http://127.0.0.1:18765";
+
+function createProviderConfig(models) {
+  return {
+    name: "Cursor Remote",
+    baseUrl: _baseUrl,
+    api: "cursor-remote-bridge",
+    apiKey: "unused",
+    streamSimple,
+    models,
+  };
+}
+
+function registerCursorRemoteProvider(pi, models) {
+  pi.registerProvider("cursor-remote", createProviderConfig(models));
+}
+
+/**
+ * @param {BridgeClient} client
+ */
+async function fetchProviderModels(client) {
+  try {
+    const json = await client.getModels();
+    if (json?.ok && Array.isArray(json.models) && json.models.length) {
+      return registerModelItems(json.models);
+    }
+  } catch {
+    // bridge not ready / no catalog yet
+  }
+  return fallbackProviderModels();
+}
 
 function streamSimple(model, context, options) {
   const stream = createLocalStream();
   (async () => {
     try {
-      // Belt-and-suspenders: primary activation is before_agent_start / session_start
-      // (agent-loop snapshots tools at turn start — mid-stream setActiveTools is too late
-      // for THIS turn's execute, but helps the next turn / follow-ups).
       if (_piRef && typeof _piRef.setActiveTools === "function") {
         const shadow = displayToolNames();
         const cur = _piRef.getActiveTools?.() || [];
@@ -104,9 +143,9 @@ function streamSimple(model, context, options) {
         _piRef.setActiveTools(merged);
       }
 
+      // Legacy follow-up (pre multi-turn drain); prefer live-run resume.
       const followUp = takeFollowUp();
       if (followUp != null) {
-        // Second turn after shadow tools: thinking + answer below tool panels.
         const output = {
           role: "assistant",
           content: [],
@@ -179,11 +218,43 @@ function streamSimple(model, context, options) {
         token: conn.token,
         unixPath: conn.unixPath,
       });
+      const thinkingLevel =
+        options?.thinkingLevel ||
+        options?.reasoning ||
+        context?.thinkingLevel ||
+        "off";
+      const piModelId = typeof model?.id === "string" ? model.id : DEFAULT_MODEL;
+      const modelSelection = buildCursorModelSelection(piModelId, thinkingLevel);
+      const streamOpts = {
+        signal: options?.signal,
+        thinkingDisplay: conn.thinkingDisplay,
+        wireStats: conn.wireStats,
+        modelSelection,
+        model: {
+          id: piModelId,
+          api: model?.api || "cursor-remote-bridge",
+          provider: model?.provider || "cursor-remote",
+          contextWindow: model?.contextWindow,
+          maxTokens: model?.maxTokens,
+        },
+        onStreamEvent: (ev) => {
+          if (ev?.type === "_end") return;
+          stream.push(ev);
+        },
+      };
+
+      // Resume open SSE after toolUse (stock pi-cursor-sdk live-run pattern).
+      if (hasActiveLiveRun()) {
+        await resumeBridgeLiveTurn(streamOpts);
+        stream.end();
+        clearThinkingIndicator();
+        return;
+      }
+
       const text = lastUserText(context);
       if (!text) {
         throw new Error("no user text in context");
       }
-      // Reject image attachments (v1 text-only uplink)
       const messages = context?.messages || [];
       for (const m of messages) {
         if (Array.isArray(m.content) && m.content.some((b) => b?.type === "image")) {
@@ -194,20 +265,10 @@ function streamSimple(model, context, options) {
       if (!grantsFromEnv(env).length && conn.grants?.length) {
         env.BRIDGE_GRANTS = conn.grants.join(",");
       }
+
       await runPromptViaBridge(client, text, {
-        signal: options?.signal,
+        ...streamOpts,
         env,
-        thinkingDisplay: conn.thinkingDisplay,
-        wireStats: conn.wireStats,
-        model: {
-          id: coerceModel(model?.id),
-          api: model?.api || "cursor-remote-bridge",
-          provider: model?.provider || "cursor-remote",
-        },
-        onStreamEvent: (ev) => {
-          if (ev?.type === "_end") return;
-          stream.push(ev);
-        },
       });
       stream.end();
       clearThinkingIndicator();
@@ -234,48 +295,104 @@ function streamSimple(model, context, options) {
 /**
  * @param {import('./types.js').ExtensionAPI} pi
  */
-export default function register(pi) {
+export default async function register(pi) {
   if (!pi || typeof pi.registerProvider !== "function") {
     throw new Error("pi.registerProvider required (ExtensionAPI)");
   }
   _piRef = pi;
   const cfg = loadConfig();
   const conn = resolveBridgeConnection();
-  const thinkingDisplay = conn.thinkingDisplay || "indicator";
+  _baseUrl = conn.baseUrl || cfg?.baseUrl || "http://127.0.0.1:18765";
+
   const captureUi = (_event, ctx) => {
     if (ctx?.ui) bindThinkingUi(ctx.ui);
   };
+
+  const client =
+    conn.baseUrl || conn.unixPath
+      ? new BridgeClient({
+          baseUrl: conn.baseUrl,
+          token: conn.token,
+          unixPath: conn.unixPath,
+        })
+      : null;
+
+  let models = fallbackProviderModels();
+  if (client) {
+    models = await fetchProviderModels(client);
+  }
+
   if (typeof pi.on === "function") {
-    pi.on("session_start", captureUi);
+    pi.on("session_start", async (event, ctx) => {
+      captureUi(event, ctx);
+      installGenerationSpeedFooter(ctx);
+      if (!client) return;
+      try {
+        const next = await fetchProviderModels(client);
+        registerCursorRemoteProvider(pi, next);
+        const cur = ctx?.model?.id || event?.model?.id;
+        const resolved = resolveModelOrFallback(cur, next);
+        if (cur && resolved !== cur && typeof ctx?.ui?.notify === "function") {
+          ctx.ui.notify(
+            `Model "${cur}" unavailable; falling back to ${resolved}.`,
+            "warning"
+          );
+        }
+      } catch {
+        // keep previous registration
+      }
+    });
     pi.on("before_agent_start", (event, ctx) => {
       captureUi(event, ctx);
     });
+    pi.on("model_select", (_event, ctx) => {
+      captureUi(_event, ctx);
+    });
   }
-  // Shadow tools: display names without contour__; return stashed bridge results
-  // so TUI gets colored ToolExecutionComponent + local result text.
+
+  if (typeof pi.registerCommand === "function") {
+    pi.registerCommand("cursor-remote-refresh-models", {
+      description: "Refresh Cursor Remote model catalog from the VPS via local-bridge",
+      handler: async (_args, ctx) => {
+        if (!client) {
+          ctx?.ui?.notify?.("Bridge not configured; cannot refresh models.", "warning");
+          return;
+        }
+        try {
+          await client.refreshModels({ force: true });
+          // Give bridge a moment to receive models_catalog SSE.
+          await new Promise((r) => setTimeout(r, 800));
+          const next = await fetchProviderModels(client);
+          registerCursorRemoteProvider(pi, next);
+          const n = next.length;
+          ctx?.ui?.notify?.(
+            `Cursor Remote catalog refreshed (${n} model${n === 1 ? "" : "s"}).`,
+            "info"
+          );
+        } catch (err) {
+          ctx?.ui?.notify?.(
+            `Model refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      },
+    });
+  }
+
   registerShadowTools(pi);
-  // pi requires baseUrl when models[] is set; real traffic uses BridgeClient
-  const baseUrl = conn.baseUrl || cfg?.baseUrl || "http://127.0.0.1:18765";
-  pi.registerProvider("cursor-remote", {
-    name: "Cursor Remote",
-    baseUrl,
-    // Custom stream — not openai-completions (that is Level B facade)
-    api: "cursor-remote-bridge",
-    apiKey: "unused", // bridge auth is Unix/Bearer, not Cursor API key
-    streamSimple,
-    models: MODEL_VALUES.map((id) => ({
-      id,
-      name: MODEL_DISPLAY_NAMES[id] || id,
-      reasoning: thinkingDisplay !== "off",
-      input: ["text"],
-      contextWindow: 128000,
-      maxTokens: 8192,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    })),
-  });
+  registerCursorRemoteProvider(pi, models);
 }
 
-export { BridgeClient, runPromptViaBridge, streamSimple, grantsFromEnv, emptyUsage };
+export {
+  BridgeClient,
+  runPromptViaBridge,
+  resumeBridgeLiveTurn,
+  runPromptViaBridgeComplete,
+  hasActiveLiveRun,
+  streamSimple,
+  grantsFromEnv,
+  emptyUsage,
+};
 export { formatToolArgs, formatToolResult, joinThinkingChunk } from "./bridge-client.js";
 export { displayToolName } from "./tool-display.js";
 export {
@@ -296,3 +413,18 @@ export {
   clearWireStatus,
   formatBytes,
 } from "./thinking-indicator.js";
+export {
+  buildCursorModelSelection,
+  registerModelItems,
+  fallbackProviderModels,
+  encodePiModelId,
+} from "./model-discovery.js";
+export { tryApplyWireUsage, applyCursorSdkUsage } from "./usage-accounting.js";
+export {
+  recordDecodeSample,
+  resetGenerationSpeed,
+  getTokPerSec,
+  formatTokPerSec,
+  peekTokPerSecLabel,
+  installGenerationSpeedFooter,
+} from "./generation-speed.js";

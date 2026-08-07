@@ -1,0 +1,373 @@
+/**
+ * Expand VPS models_catalog into pi registerProvider models (pi-cursor-sdk style).
+ * Encodes variants as id@context:fast|:slow and builds ModelSelection for /prompt.
+ */
+
+import { DEFAULT_MODEL } from "./config.js";
+
+const FALLBACK_CONTEXT_WINDOW = 128000;
+const FALLBACK_MAX_TOKENS = 8192;
+const ZERO_COST = Object.freeze({
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+});
+
+/** @type {Map<string, object>} */
+const metadataByPiModelId = new Map();
+
+/**
+ * @param {unknown} item
+ * @param {string} id
+ */
+function getParameter(item, id) {
+  const params = item?.parameters;
+  if (!Array.isArray(params)) return undefined;
+  return params.find((p) => p && p.id === id);
+}
+
+/**
+ * @param {object | undefined} parameter
+ * @param {string} value
+ */
+function getParameterValue(parameter, value) {
+  if (!parameter || !Array.isArray(parameter.values)) return null;
+  const hit = parameter.values.find((v) => String(v?.value) === value);
+  return hit ? String(hit.value) : null;
+}
+
+/**
+ * @param {object | undefined} parameter
+ * @param {string[]} preferred
+ */
+function getPreferredParameterValue(parameter, preferred) {
+  for (const p of preferred) {
+    const v = getParameterValue(parameter, p);
+    if (v != null) return v;
+  }
+  return null;
+}
+
+function hasBooleanValues(parameter) {
+  if (!parameter || !Array.isArray(parameter.values)) return false;
+  const vals = new Set(parameter.values.map((v) => String(v?.value).toLowerCase()));
+  return vals.has("true") && vals.has("false");
+}
+
+/**
+ * @param {object | undefined} parameter
+ * @param {string} level
+ */
+function mapComparableLevel(parameter, level) {
+  if (level === "xhigh") {
+    return getPreferredParameterValue(parameter, ["xhigh", "extra-high"]);
+  }
+  return getParameterValue(parameter, level);
+}
+
+/**
+ * @param {object} item
+ * @returns {Record<string, string|null> | undefined}
+ */
+export function getThinkingLevelMap(item) {
+  const reasoningParameter = getParameter(item, "reasoning");
+  const effortParameter = getParameter(item, "effort");
+  const thinkingParameter = getParameter(item, "thinking");
+  const valueParameter = effortParameter ?? reasoningParameter ?? thinkingParameter;
+  if (!valueParameter) return undefined;
+
+  if (valueParameter.id === "thinking" && hasBooleanValues(valueParameter)) {
+    return {
+      off: getParameterValue(valueParameter, "false"),
+      minimal: null,
+      low: null,
+      medium: null,
+      high: getParameterValue(valueParameter, "true"),
+      xhigh: null,
+      max: null,
+    };
+  }
+
+  return {
+    off:
+      getParameterValue(reasoningParameter, "none") ??
+      getParameterValue(reasoningParameter, "off") ??
+      getParameterValue(thinkingParameter, "false"),
+    minimal: mapComparableLevel(valueParameter, "minimal"),
+    low: mapComparableLevel(valueParameter, "low"),
+    medium: mapComparableLevel(valueParameter, "medium"),
+    high: mapComparableLevel(valueParameter, "high"),
+    xhigh: mapComparableLevel(valueParameter, "xhigh"),
+    max: mapComparableLevel(valueParameter, "max"),
+  };
+}
+
+/**
+ * @param {string} value
+ */
+function parseContextWindow(value) {
+  const match = /^(\d+(?:\.\d+)?)([km])$/i.exec(String(value || "").trim());
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  const unit = match[2]?.toLowerCase();
+  if (!Number.isFinite(amount)) return undefined;
+  return Math.round(amount * (unit === "m" ? 1000000 : 1000));
+}
+
+/**
+ * @param {Array<{id:string,value:string}>} params
+ */
+function cloneParams(params) {
+  return (params || []).map((p) => ({ id: p.id, value: p.value }));
+}
+
+/**
+ * @param {object} item
+ */
+function getDefaultParams(item) {
+  const variants = item?.variants;
+  if (!Array.isArray(variants) || !variants.length) return [];
+  const defaultVariant = variants.find((v) => v.is_default || v.isDefault) ?? variants[0];
+  return cloneParams(defaultVariant?.params || []);
+}
+
+/**
+ * @param {Array<{id:string,value:string}>} params
+ * @param {string} id
+ * @param {string} value
+ */
+function replaceParam(params, id, value) {
+  let replaced = false;
+  const next = params.map((param) => {
+    if (param.id !== id) return { ...param };
+    replaced = true;
+    return { id, value };
+  });
+  if (!replaced) next.push({ id, value });
+  return next;
+}
+
+function getParamValue(params, id) {
+  return params.find((p) => p.id === id)?.value;
+}
+
+/**
+ * @param {string} modelId
+ * @param {string} [context]
+ * @param {boolean} [fastOverride]
+ */
+export function encodePiModelId(modelId, context, fastOverride) {
+  const contextQualified = context ? `${modelId}@${context}` : modelId;
+  if (fastOverride === true) return `${contextQualified}:fast`;
+  if (fastOverride === false) return `${contextQualified}:slow`;
+  return contextQualified;
+}
+
+function getModelName(item, context, fastOverride) {
+  const displayName = item.display_name || item.displayName || item.id;
+  const qualifiers = [];
+  if (fastOverride === true) qualifiers.push("fast");
+  if (fastOverride === false) qualifiers.push("slow");
+  const baseName = qualifiers.length
+    ? `${displayName} (${qualifiers.join(", ")})`
+    : displayName;
+  return context ? `${baseName} @ ${context}` : baseName;
+}
+
+function getContextValues(item) {
+  return getParameter(item, "context")?.values?.map((v) => v.value) ?? [];
+}
+
+/**
+ * @param {object[]} items
+ * @returns {object[]}
+ */
+export function registerModelItems(items) {
+  metadataByPiModelId.clear();
+  const used = new Set();
+  const configs = [];
+  const sorted = [...(items || [])].sort((a, b) =>
+    String(a.id || "").localeCompare(String(b.id || ""))
+  );
+
+  for (const item of sorted) {
+    if (!item || typeof item.id !== "string" || !item.id) continue;
+    const defaultParams = getDefaultParams(item);
+    const contextValues = getContextValues(item);
+    const contexts = contextValues.length > 0 ? contextValues : [undefined];
+    const fastOverrides =
+      getParameter(item, "fast") === undefined ? [undefined] : [undefined, true, false];
+
+    for (const context of contexts) {
+      const contextParams = context
+        ? replaceParam(defaultParams, "context", context)
+        : defaultParams;
+      for (const fastOverride of fastOverrides) {
+        const params =
+          fastOverride === undefined
+            ? contextParams
+            : replaceParam(contextParams, "fast", fastOverride ? "true" : "false");
+        const piModelId = encodePiModelId(item.id, context, fastOverride);
+        if (used.has(piModelId)) continue;
+        used.add(piModelId);
+        const thinkingLevelMap = getThinkingLevelMap(item);
+        const contextWindow =
+          (context ? parseContextWindow(context) : undefined) ?? FALLBACK_CONTEXT_WINDOW;
+        const meta = {
+          piModelId,
+          baseModelId: item.id,
+          selectionModelId: item.id,
+          displayName: item.display_name || item.displayName || item.id,
+          defaultParams: cloneParams(params),
+          context,
+          contextWindow,
+          supportsFast: getParameter(item, "fast") !== undefined,
+          defaultFast: getParamValue(params, "fast")?.toLowerCase() === "true",
+          fastOverride,
+          supportsReasoning: thinkingLevelMap !== undefined,
+          thinkingLevelMap,
+          parameterIds: {
+            context: getParameter(item, "context") !== undefined,
+            reasoning: getParameter(item, "reasoning") !== undefined,
+            effort: getParameter(item, "effort") !== undefined,
+            thinking: getParameter(item, "thinking") !== undefined,
+            fast: getParameter(item, "fast") !== undefined,
+          },
+        };
+        metadataByPiModelId.set(piModelId, meta);
+        configs.push({
+          id: piModelId,
+          name: getModelName(item, context, fastOverride),
+          reasoning: Boolean(thinkingLevelMap),
+          ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+          input: ["text"],
+          cost: { ...ZERO_COST },
+          contextWindow,
+          maxTokens: FALLBACK_MAX_TOKENS,
+        });
+      }
+    }
+  }
+
+  if (!configs.length) {
+    return fallbackProviderModels();
+  }
+  return configs;
+}
+
+export function fallbackProviderModels() {
+  metadataByPiModelId.clear();
+  const items = [
+    { id: DEFAULT_MODEL, display_name: "Composer 2.5", parameters: [], variants: [] },
+    { id: "auto", display_name: "Auto", parameters: [], variants: [] },
+    {
+      id: "auto-smart",
+      display_name: "Auto (Router)",
+      parameters: [
+        {
+          id: "optimize_for",
+          display_name: "Optimize for",
+          values: [
+            { value: "cost", display_name: "Cost" },
+            { value: "balanced", display_name: "Balance" },
+            { value: "intelligence", display_name: "Intelligence" },
+          ],
+        },
+      ],
+      variants: [
+        {
+          params: [{ id: "optimize_for", value: "balanced" }],
+          display_name: "Balance",
+          is_default: true,
+        },
+      ],
+    },
+  ];
+  return registerModelItems(items);
+}
+
+export function getCursorModelMetadata(modelId) {
+  return metadataByPiModelId.get(modelId);
+}
+
+export function knownPiModelIds() {
+  return new Set(metadataByPiModelId.keys());
+}
+
+/**
+ * @param {object} metadata
+ * @param {Array<{id:string,value:string}>} params
+ * @param {string} level
+ */
+function applyThinkingLevel(metadata, params, level) {
+  if (!metadata?.thinkingLevelMap || level === "off") {
+    if (metadata?.parameterIds?.thinking) {
+      const idx = params.findIndex((p) => p.id === "thinking");
+      if (idx >= 0) params.splice(idx, 1);
+      else params.push({ id: "thinking", value: "false" });
+    }
+    if (metadata?.parameterIds?.reasoning) {
+      const mapped = metadata.thinkingLevelMap?.off;
+      if (mapped) {
+        const existing = params.find((p) => p.id === "reasoning" || p.id === "effort");
+        if (existing) existing.value = mapped;
+        else {
+          const id = metadata.parameterIds.effort ? "effort" : "reasoning";
+          params.push({ id, value: mapped });
+        }
+      }
+    }
+    return;
+  }
+  const mapped = metadata.thinkingLevelMap[level];
+  if (mapped == null) return;
+  if (metadata.parameterIds.effort) {
+    const existing = params.find((p) => p.id === "effort");
+    if (existing) existing.value = mapped;
+    else params.push({ id: "effort", value: mapped });
+    return;
+  }
+  if (metadata.parameterIds.reasoning) {
+    const existing = params.find((p) => p.id === "reasoning");
+    if (existing) existing.value = mapped;
+    else params.push({ id: "reasoning", value: mapped });
+    return;
+  }
+  if (metadata.parameterIds.thinking) {
+    const existing = params.find((p) => p.id === "thinking");
+    if (existing) existing.value = mapped;
+    else params.push({ id: "thinking", value: mapped });
+  }
+}
+
+/**
+ * @param {string} modelId pi model id (may include @context:fast)
+ * @param {string} [thinkingLevel]
+ * @returns {{id: string, params?: Array<{id:string,value:string}>}}
+ */
+export function buildCursorModelSelection(modelId, thinkingLevel = "off") {
+  const metadata = getCursorModelMetadata(modelId);
+  if (!metadata) {
+    // Bare id or unknown — soft fallback handled on bridge/VPS.
+    const base = typeof modelId === "string" && modelId ? modelId : DEFAULT_MODEL;
+    return { id: base.split("@")[0].replace(/:(?:fast|slow)$/, "") || DEFAULT_MODEL };
+  }
+  const params = cloneParams(metadata.defaultParams);
+  applyThinkingLevel(metadata, params, thinkingLevel);
+  return params.length
+    ? { id: metadata.selectionModelId, params }
+    : { id: metadata.selectionModelId };
+}
+
+/**
+ * Soft fallback: if current pi model id missing from catalog → composer-2.5.
+ * @param {string | undefined} currentId
+ * @param {object[]} providerModels
+ */
+export function resolveModelOrFallback(currentId, providerModels) {
+  const ids = new Set((providerModels || []).map((m) => m.id));
+  if (currentId && ids.has(currentId)) return currentId;
+  if (ids.has(DEFAULT_MODEL)) return DEFAULT_MODEL;
+  return providerModels[0]?.id || DEFAULT_MODEL;
+}

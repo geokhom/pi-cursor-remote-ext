@@ -16,7 +16,6 @@ import {
   clearToolResults,
   trackCallId,
   setFollowUp,
-  setFollowUpText,
 } from "./result-stash.js";
 import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT, coerceWireStats, WIRE_STATS_DEFAULT, DEFAULT_MODEL } from "./config.js";
 import {
@@ -25,6 +24,16 @@ import {
   setWireStatus,
   clearWireStatus,
 } from "./thinking-indicator.js";
+import { tryApplyWireUsage } from "./usage-accounting.js";
+import {
+  clearLiveRun,
+  getActiveLiveRun,
+  hasActiveLiveRun,
+  isPostToolBoundaryEvent,
+  settleToolBatch,
+  startLiveEventFeeder,
+} from "./live-run.js";
+import { recordDecodeSample } from "./generation-speed.js";
 
 /**
  * Join thinking chunks into flowing prose (SDK often sends short lines / CR).
@@ -100,7 +109,7 @@ export class BridgeClient {
    * POST /prompt — enqueue user text on the bridge FIFO.
    * @param {string} text
    * @param {string} [requestId]
-   * @param {{ model?: string }} [opts]
+   * @param {{ model?: string | {id: string, params?: Array<{id:string,value:string}>} }} [opts]
    */
   async prompt(text, requestId, opts = {}) {
     const payload = {
@@ -108,6 +117,8 @@ export class BridgeClient {
       request_id: requestId || `req-${Date.now()}`,
     };
     if (typeof opts.model === "string" && opts.model) {
+      payload.model = opts.model;
+    } else if (opts.model && typeof opts.model === "object" && opts.model.id) {
       payload.model = opts.model;
     }
     const body = JSON.stringify(payload);
@@ -122,6 +133,32 @@ export class BridgeClient {
       throw new Error(`prompt rejected: ${json.error || "unknown"}`);
     }
     return json;
+  }
+
+  /**
+   * GET /models — cached VPS catalog snapshot.
+   */
+  async getModels() {
+    const res = await this._request("GET", "/models", null, {});
+    if (res.statusCode !== 200) {
+      throw new Error(`models GET HTTP ${res.statusCode}: ${res.body}`);
+    }
+    return JSON.parse(res.body || "{}");
+  }
+
+  /**
+   * POST /models/refresh — request fresh models_catalog from VPS.
+   * @param {{ force?: boolean }} [opts]
+   */
+  async refreshModels(opts = {}) {
+    const body = JSON.stringify({ force: Boolean(opts.force) });
+    const res = await this._request("POST", "/models/refresh", body, {
+      "Content-Type": "application/json",
+    });
+    if (res.statusCode !== 200) {
+      throw new Error(`models refresh HTTP ${res.statusCode}: ${res.body}`);
+    }
+    return JSON.parse(res.body || "{}");
   }
 
   /**
@@ -437,10 +474,10 @@ export function emptyUsage() {
 /**
  * Map bridge SSE events → pi-ai-like stream pushes (no pi-ai dependency).
  *
- * Tools: emit toolcall_* with display names (no contour__ prefix). Shadow tools
- * registered by the extension return stashed local results so pi paints
- * ToolExecutionComponent (colored success/error + result text) without
- * re-running work or fetching via corp proxy.
+ * Like stock pi-cursor-sdk: end a stream turn at each tool batch (`done` /
+ * `toolUse`) so pi paints ToolExecution panels immediately, keep SSE open,
+ * then resume on the next `streamSimple` without a new prompt. Post-tool
+ * thinking/text land in the following turn (below the tool panels).
  *
  * @param {BridgeClient} client
  * @param {string} text
@@ -452,7 +489,8 @@ export function emptyUsage() {
  *   applyGrants?: boolean,
  *   env?: NodeJS.ProcessEnv,
  *   timeoutMs?: number,
- *   model?: { id?: string, api?: string, provider?: string },
+ *   model?: { id?: string, api?: string, provider?: string, contextWindow?: number, maxTokens?: number },
+ *   modelSelection?: { id: string, params?: Array<{id:string,value:string}> },
  *   thinkingDisplay?: "off"|"indicator"|"full",
  *   wireStats?: "session"|"request",
  *   onThinkingIndicator?: (active: boolean) => void,
@@ -463,6 +501,72 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   setFollowUp(null);
   clearThinkingIndicator();
   clearWireStatus();
+  clearLiveRun();
+
+  let grants = [];
+  if (opts.applyGrants !== false) {
+    grants = await applyEnvGrants(client, opts.env || process.env);
+  }
+
+  const session = startLiveEventFeeder(
+    client,
+    opts.signal,
+    opts.timeoutMs ?? 600_000
+  );
+  await new Promise((r) => setTimeout(r, 30));
+  const model = opts.model || {};
+  const promptChars = typeof text === "string" ? text.length : 0;
+  await client.prompt(text, opts.requestId, {
+    model:
+      opts.modelSelection ||
+      (typeof model.id === "string" ? model.id : undefined),
+  });
+
+  const result = await drainLiveRunTurn({
+    ...opts,
+    _promptChars: promptChars,
+  });
+  return { ...result, grants };
+}
+
+/**
+ * Continue an open bridge SSE session (next pi agent turn after toolUse).
+ * @param {Parameters<typeof runPromptViaBridge>[2]} [opts]
+ */
+export async function resumeBridgeLiveTurn(opts = {}) {
+  if (!hasActiveLiveRun()) {
+    throw new Error("no active bridge live run to resume");
+  }
+  return drainLiveRunTurn(opts);
+}
+
+/**
+ * Drain until the live run is fully finished (for smokes / non-TUI callers).
+ * @param {BridgeClient} client
+ * @param {string} text
+ * @param {Parameters<typeof runPromptViaBridge>[2]} [opts]
+ */
+export async function runPromptViaBridgeComplete(client, text, opts = {}) {
+  let result = await runPromptViaBridge(client, text, opts);
+  const allEvents = [...(result.events || [])];
+  const grants = result.grants;
+  while (hasActiveLiveRun()) {
+    result = await resumeBridgeLiveTurn(opts);
+    allEvents.push(...(result.events || []));
+  }
+  return { ...result, events: allEvents, grants };
+}
+
+export { hasActiveLiveRun, getActiveLiveRun, clearLiveRun };
+
+/**
+ * @param {Parameters<typeof runPromptViaBridge>[2] & { _promptChars?: number }} opts
+ */
+async function drainLiveRunTurn(opts = {}) {
+  const session = getActiveLiveRun();
+  if (!session) {
+    throw new Error("no active bridge live run");
+  }
 
   const thinkingDisplay = coerceThinkingDisplay(
     opts.thinkingDisplay ?? THINKING_DISPLAY_DEFAULT
@@ -494,7 +598,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   };
 
   const model = opts.model || {};
-  const promptChars = typeof text === "string" ? text.length : 0;
+  const promptChars = Number(opts._promptChars) || 0;
   const output = {
     role: "assistant",
     content: [],
@@ -505,14 +609,9 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     stopReason: "pending",
     timestamp: Date.now(),
   };
-  output.usage.input = Math.max(1, Math.ceil(promptChars / 4));
+  output.usage.input = Math.max(1, Math.ceil(promptChars / 4) || 1);
   output.usage.totalTokens = output.usage.input;
   stream.push({ type: "start", partial: output });
-
-  let grants = [];
-  if (opts.applyGrants !== false) {
-    grants = await applyEnvGrants(client, opts.env || process.env);
-  }
 
   /** @type {number | null} */
   let textIndex = null;
@@ -520,21 +619,35 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   /** @type {number | null} */
   let thinkingIndex = null;
   let thinkingBuf = "";
-  let sawToolCall = false;
-  /** Text after first tool → follow-up assistant message (below tool panels). */
-  let deferredText = "";
-  /** Post-tool thinking → follow-up turn (same reason as deferredText). */
-  let deferredThinking = "";
+  let toolsThisTurn = 0;
+  /** @type {Set<string>} */
+  const pendingExec = new Set();
   /** @type {number | null} */
   let firstOutAt = null;
+  const turnRaw = [];
+  let finished = false;
+  /** @type {object[]} Post-tool events held while tool_executed still pending (run_finished race). */
+  const deferredBoundary = [];
+
   const markOut = () => {
     if (firstOutAt == null) firstOutAt = Date.now();
+    session.markFirstOut?.();
+  };
+
+  const maybeRecordDecodeSpeed = () => {
+    if (session.decodeSampleRecorded) return;
+    const start = session.firstOutAt;
+    if (start == null) return;
+    const tokens = Number(output.usage?.output) || 0;
+    const decodeMs = Math.max(1, Date.now() - start);
+    if (tokens <= 0) return;
+    session.decodeSampleRecorded = true;
+    recordDecodeSample(tokens, decodeMs);
   };
 
   const outChars = () =>
-    deferredText.length +
-    deferredThinking.length +
     thinkingBuf.length +
+    textBuf.length +
     output.content.reduce((acc, c) => {
       if (c.type === "text") return acc + (c.text?.length || 0);
       if (c.type === "thinking") return acc + (c.thinking?.length || 0);
@@ -591,7 +704,6 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     thinkingBuf = "";
   };
 
-  /** Close current text block so the next toolCall gets its own contentIndex. */
   const endTextBlock = () => {
     if (textIndex == null) return;
     stream.push({
@@ -607,14 +719,6 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   /** @param {string} chunk */
   const appendThinking = (chunk) => {
     if (!chunk || thinkingDisplay !== "full") return;
-    // After tools: defer — pi paints all thinking inside AssistantMessage
-    // above sibling ToolExecution panels.
-    if (sawToolCall) {
-      deferredThinking = joinThinkingChunk(deferredThinking, chunk);
-      markOut();
-      bumpUsage();
-      return;
-    }
     if (thinkingIndex == null) {
       endTextBlock();
       thinkingIndex = output.content.length;
@@ -646,14 +750,6 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     if (!chunk) return;
     endThinkingBlock();
     notifyIndicator(false);
-    // After tools started: hold final answer for a second stream turn so pi
-    // renders it under the colored tool panels (same-message text always sits above).
-    if (sawToolCall) {
-      deferredText += chunk;
-      markOut();
-      bumpUsage();
-      return;
-    }
     if (textIndex == null) {
       textIndex = output.content.length;
       textBuf = "";
@@ -681,6 +777,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     endThinkingBlock();
     endTextBlock();
     notifyIndicator(false);
+    markOut();
     const name = displayToolName(wireName);
     const id =
       (typeof callId === "string" && callId) ||
@@ -694,7 +791,8 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       arguments: args && typeof args === "object" ? args : {},
     };
     output.content.push(toolCall);
-    sawToolCall = true;
+    toolsThisTurn += 1;
+    if (typeof callId === "string" && callId) pendingExec.add(callId);
     bumpUsage();
     stream.push({ type: "toolcall_start", contentIndex, partial: output });
     stream.push({
@@ -705,17 +803,60 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     });
   };
 
+  /** @param {string} reason */
+  const finishTurn = (reason) => {
+    if (finished) return;
+    finished = true;
+    endThinkingBlock();
+    endTextBlock();
+    notifyIndicator(false);
+    output.stopReason = reason;
+    if (reason === "error" || reason === "aborted") {
+      setFollowUp(null);
+      clearLiveRun();
+      stream.push({ type: "error", reason, error: output });
+    } else {
+      stream.push({ type: "done", reason, message: output });
+      if (reason === "stop") {
+        clearLiveRun();
+      }
+    }
+    stream.end();
+  };
+
+  /**
+   * After a tool batch is complete, end the turn so pi can execute shadows.
+   * @returns {Promise<boolean>}
+   */
+  const flushDeferredBoundary = () => {
+    for (let i = deferredBoundary.length - 1; i >= 0; i--) {
+      session.unshift(deferredBoundary[i]);
+    }
+    deferredBoundary.length = 0;
+  };
+
+  const tryEndToolBatch = async () => {
+    if (toolsThisTurn <= 0 || pendingExec.size > 0) return false;
+    await settleToolBatch();
+    while (session.peek()?.type === "tool_call") {
+      const next = await session.nextEvent();
+      if (!next) break;
+      turnRaw.push(next);
+      handleEvent(next);
+    }
+    if (pendingExec.size > 0) return false;
+    flushDeferredBoundary();
+    finishTurn("toolUse");
+    return true;
+  };
+
   /** @param {object} ev */
-  const handleLive = (ev) => {
+  function handleEvent(ev) {
     if (typeof opts.onEvent === "function") opts.onEvent(ev);
     if (ev.type === "thinking_start") {
       if (thinkingDisplay === "indicator") {
         notifyIndicator(true);
-      } else if (
-        thinkingDisplay === "full" &&
-        thinkingIndex == null &&
-        !sawToolCall
-      ) {
+      } else if (thinkingDisplay === "full" && thinkingIndex == null) {
         endTextBlock();
         thinkingIndex = output.content.length;
         thinkingBuf = "";
@@ -729,20 +870,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     } else if (ev.type === "thinking_delta" && typeof ev.text === "string") {
       appendThinking(ev.text);
     } else if (ev.type === "thinking_end") {
-      // Soft end: keep the same thinking block open so consecutive SDK
-      // thoughts coalesce (pi joins separate blocks with \n\n → "column").
-      // Hard-close on assistant / tool / terminal below.
-      if (thinkingDisplay === "indicator") {
-        // Stay lit until answer/tools; brief end pulses would flicker.
-      }
+      // Soft end — coalesce consecutive SDK thoughts into one block.
     } else if (ev.type === "assistant_delta" && typeof ev.text === "string") {
       appendText(ev.text);
     } else if (ev.type === "assistant_message" && typeof ev.text === "string") {
-      if (sawToolCall) {
-        if (!deferredText.includes(ev.text)) {
-          appendText((deferredText.endsWith("\n") ? "" : "\n") + ev.text);
-        }
-      } else if (!textBuf) {
+      if (!textBuf) {
         appendText(ev.text);
       } else if (!textBuf.includes(ev.text)) {
         appendText((textBuf.endsWith("\n") ? "" : "\n") + ev.text);
@@ -758,8 +890,10 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       const wireName = typeof ev.name === "string" ? ev.name : "";
       const display = displayToolName(wireName || "tool");
       const id =
-        callId || `exec-${Date.now().toString(36)}-${stashSizeApprox()}`;
+        callId ||
+        `exec-${Date.now().toString(36)}-${output.content.filter((c) => c.type === "toolCall").length}`;
       trackCallId(display, id);
+      if (callId) pendingExec.delete(callId);
       stashToolResult(id, {
         ok: ev.ok !== false,
         content: ev.content,
@@ -769,8 +903,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     } else if (ev.type === "run_finished") {
       endThinkingBlock();
       notifyIndicator(false);
-      output.stopReason = sawToolCall ? "toolUse" : "stop";
+      if (!tryApplyWireUsage(output, ev.usage, model)) {
+        bumpUsage();
+      }
       applyWireStats(ev);
+      maybeRecordDecodeSpeed();
     } else if (ev.type === "run_error") {
       endThinkingBlock();
       notifyIndicator(false);
@@ -785,9 +922,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
           : `policy: blocked tool "${tn}" — use only contour__* tools ` +
             "(list_dir/read_file/write_file/mkdir/delete_path/shell/ping)";
       } else {
-        output.errorMessage = ev.message
-          ? `${kind}: ${ev.message}`
-          : kind;
+        output.errorMessage = ev.message ? `${kind}: ${ev.message}` : kind;
       }
     } else if (ev.type === "session_end") {
       endThinkingBlock();
@@ -796,51 +931,93 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       const detail = ev.detail ? `:${ev.detail}` : "";
       output.errorMessage = `session_end:${ev.reason || ""}${detail}`;
     }
+  }
+
+  try {
+    while (!finished) {
+      const ev = await session.nextEvent();
+      if (!ev) {
+        flushDeferredBoundary();
+        if (toolsThisTurn > 0) {
+          finishTurn("toolUse");
+        } else if (session.error) {
+          output.errorMessage = session.error.message;
+          finishTurn("error");
+        } else if (output.content.some((c) => c.type === "text" || c.type === "thinking")) {
+          finishTurn("stop");
+        } else {
+          output.errorMessage = "stream ended without terminal";
+          finishTurn("error");
+        }
+        break;
+      }
+
+      // Tool batch already emitted: post-tool thinking/text belong on the next turn.
+      // If tool_executed is still pending (run_finished race), buffer until stash is ready.
+      if (toolsThisTurn > 0 && isPostToolBoundaryEvent(ev)) {
+        if (pendingExec.size > 0) {
+          deferredBoundary.push(ev);
+          continue;
+        }
+        session.unshift(ev);
+        flushDeferredBoundary();
+        finishTurn("toolUse");
+        break;
+      }
+
+      turnRaw.push(ev);
+      handleEvent(ev);
+
+      if (output.stopReason === "error" || output.stopReason === "aborted") {
+        finishTurn(output.stopReason);
+        break;
+      }
+
+      if (ev.type === "tool_call") {
+        await settleToolBatch();
+        while (session.peek()?.type === "tool_call") {
+          const next = await session.nextEvent();
+          if (!next) break;
+          if (toolsThisTurn > 0 && isPostToolBoundaryEvent(next)) {
+            if (pendingExec.size > 0) {
+              deferredBoundary.push(next);
+            } else {
+              session.unshift(next);
+              break;
+            }
+            break;
+          }
+          turnRaw.push(next);
+          handleEvent(next);
+        }
+        if (await tryEndToolBatch()) break;
+        continue;
+      }
+
+      if (ev.type === "tool_executed") {
+        if (await tryEndToolBatch()) break;
+        continue;
+      }
+
+      if (ev.type === "run_finished") {
+        finishTurn(toolsThisTurn > 0 ? "toolUse" : "stop");
+        break;
+      }
+    }
+  } catch (err) {
+    if (opts.signal?.aborted) {
+      output.errorMessage = err instanceof Error ? err.message : String(err);
+      finishTurn("aborted");
+    } else {
+      output.errorMessage = err instanceof Error ? err.message : String(err);
+      finishTurn("error");
+    }
+  }
+
+  return {
+    stream,
+    events: turnRaw,
+    output,
+    grants: [],
   };
-
-  function stashSizeApprox() {
-    return output.content.filter((c) => c.type === "toolCall").length;
-  }
-
-  // Start SSE before prompt so we do not miss early events.
-  // Default 10m — Cursor runs with tools exceed the old 15s smoke timeout.
-  const collectPromise = client.collectUntilTerminal(
-    opts.signal,
-    opts.timeoutMs ?? 600_000,
-    handleLive
-  );
-  await new Promise((r) => setTimeout(r, 30));
-  await client.prompt(text, opts.requestId, {
-    model: typeof model.id === "string" ? model.id : undefined,
-  });
-
-  const events = await collectPromise;
-  endThinkingBlock();
-  endTextBlock();
-  notifyIndicator(false);
-
-  if (deferredText.trim() || deferredThinking.trim()) {
-    setFollowUp({
-      text: deferredText.trim() || undefined,
-      thinking: deferredThinking.trim() || undefined,
-    });
-  }
-
-  if (output.stopReason === "pending") {
-    output.stopReason = "error";
-    output.errorMessage = "stream ended without terminal";
-  }
-  if (output.stopReason === "error" || output.stopReason === "aborted") {
-    setFollowUp(null); // cancel follow-up on error
-    stream.push({ type: "error", reason: output.stopReason, error: output });
-  } else {
-    // toolUse → agent runs shadow tools (stashed results); if follow-up
-    // exists, terminate:false continues into a second stream turn below tools.
-    const reason =
-      output.stopReason === "toolUse" || sawToolCall ? "toolUse" : "stop";
-    output.stopReason = reason;
-    stream.push({ type: "done", reason, message: output });
-  }
-  stream.end();
-  return { stream, events, output, grants };
 }

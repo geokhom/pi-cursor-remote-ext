@@ -3,10 +3,9 @@
  * instantly and paint ToolExecutionComponent (colored bg + result text).
  * Results are local — already on the contour machine; no proxy fetch.
  *
- * Also holds deferred assistant text/thinking for a follow-up stream turn so
- * the TUI shows tools above the final answer. Pi always paints AssistantMessage
- * (all thinking+text) above sibling ToolExecution panels — post-tool thinking
- * must not stay in the first message or it appears above the tool UI.
+ * Also holds a legacy follow-up assistant text/thinking slot (pre live-run
+ * multi-turn). Prefer `live-run.js` resume: each tool batch ends a stream turn
+ * so thinking under tools and live tool output paint like stock pi-cursor-sdk.
  *
  * State lives on globalThis (Symbol.for) so jiti/static vs dynamic imports of
  * this module still share one Map — otherwise stash writes land in one
