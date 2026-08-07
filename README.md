@@ -26,13 +26,15 @@ export https_proxy="${https_proxy:-$http_proxy}"
 VER=0.1.19
 curl -fsSL -x "$http_proxy" -o pi-cursor-remote.tgz \
   "https://github.com/geokhom/pi-cursor-remote-ext/releases/download/v${VER}/pi-cursor-remote-${VER}.tgz"
-tar -xzf pi-cursor-remote.tgz          # создаёт каталог package/
-pi install ./package
+tar -xzf pi-cursor-remote.tgz          # каталог pi-cursor-remote/
+pi install ./pi-cursor-remote          # в settings → "pi-cursor-remote" (не "package")
 ```
 
-`npm pack` кладёт файлы в префикс `package/` внутри архива — путь для `pi install` = `./package` после распаковки.
+Tarball собирается с корнем `pi-cursor-remote/` (не сырой `npm pack` с `package/`), чтобы в `~/.pi/agent/settings.json` было нормальное имя.
 
-То же для обновлений: новый GET tarball → `pi remove` старого source при необходимости → `pi install ./package`.
+Если уже стоит `"package"`: `pi remove package`, затем установить заново как выше (или вручную заменить `"package"` → путь к каталогу `pi-cursor-remote`).
+
+То же для обновлений: новый GET tarball → `pi remove pi-cursor-remote` при необходимости → `pi install ./pi-cursor-remote`.
 
 ### C. npm registry (когда пакет опубликован и GET к registry разрешён)
 
