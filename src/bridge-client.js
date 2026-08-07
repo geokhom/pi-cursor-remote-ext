@@ -18,7 +18,7 @@ import {
   setFollowUp,
   setFollowUpText,
 } from "./result-stash.js";
-import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT, coerceWireStats, WIRE_STATS_DEFAULT } from "./config.js";
+import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT, coerceWireStats, WIRE_STATS_DEFAULT, DEFAULT_MODEL } from "./config.js";
 import {
   showThinkingIndicator,
   clearThinkingIndicator,
@@ -100,12 +100,17 @@ export class BridgeClient {
    * POST /prompt — enqueue user text on the bridge FIFO.
    * @param {string} text
    * @param {string} [requestId]
+   * @param {{ model?: string }} [opts]
    */
-  async prompt(text, requestId) {
-    const body = JSON.stringify({
+  async prompt(text, requestId, opts = {}) {
+    const payload = {
       text,
       request_id: requestId || `req-${Date.now()}`,
-    });
+    };
+    if (typeof opts.model === "string" && opts.model) {
+      payload.model = opts.model;
+    }
+    const body = JSON.stringify(payload);
     const res = await this._request("POST", "/prompt", body, {
       "Content-Type": "application/json",
     });
@@ -495,7 +500,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     content: [],
     api: model.api || "cursor-remote-bridge",
     provider: model.provider || "cursor-remote",
-    model: model.id || "cursor-remote",
+    model: model.id || DEFAULT_MODEL,
     usage: emptyUsage(),
     stopReason: "pending",
     timestamp: Date.now(),
@@ -805,7 +810,9 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     handleLive
   );
   await new Promise((r) => setTimeout(r, 30));
-  await client.prompt(text, opts.requestId);
+  await client.prompt(text, opts.requestId, {
+    model: typeof model.id === "string" ? model.id : undefined,
+  });
 
   const events = await collectPromise;
   endThinkingBlock();

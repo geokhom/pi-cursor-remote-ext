@@ -10,6 +10,7 @@
 import { displayToolNames, displayToolName } from "./tool-display.js";
 import { takeToolResult, hasFollowUpText } from "./result-stash.js";
 import { formatToolArgs, formatToolResult } from "./bridge-client.js";
+import { MODEL_VALUE_SET } from "./config.js";
 
 /** Loose JSON Schema — accepted by pi's typebox/json validator path. */
 const ANY_OBJECT = {
@@ -162,7 +163,8 @@ function isCursorRemoteModel(model) {
   return (
     m?.provider === "cursor-remote" ||
     m?.api === "cursor-remote-bridge" ||
-    m?.id === "cursor-remote"
+    m?.id === "cursor-remote" ||
+    (typeof m?.id === "string" && MODEL_VALUE_SET.has(m.id))
   );
 }
 

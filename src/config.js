@@ -19,6 +19,18 @@ export const THINKING_DISPLAY_DEFAULT = "indicator";
 export const WIRE_STATS_VALUES = new Set(["session", "request"]);
 export const WIRE_STATS_DEFAULT = "session";
 
+/** Cursor SDK model ids (static allowlist; mirrors pi_cursor_wire.constants). */
+export const DEFAULT_MODEL = "composer-2.5";
+export const MODEL_VALUES = Object.freeze(["composer-2.5", "auto"]);
+/** @type {ReadonlySet<string>} */
+export const MODEL_VALUE_SET = new Set(MODEL_VALUES);
+
+/** @type {Record<string, string>} */
+export const MODEL_DISPLAY_NAMES = {
+  "composer-2.5": "Composer 2.5",
+  auto: "Auto",
+};
+
 /**
  * @param {unknown} raw
  * @returns {"off"|"indicator"|"full"}
@@ -49,6 +61,22 @@ export function coerceWireStats(raw) {
   return WIRE_STATS_DEFAULT;
 }
 
+/**
+ * @param {unknown} raw
+ * @returns {string}
+ */
+export function coerceModel(raw) {
+  if (typeof raw === "string") {
+    const v = raw.trim();
+    if (MODEL_VALUE_SET.has(v)) return v;
+    const low = v.toLowerCase();
+    for (const m of MODEL_VALUES) {
+      if (m.toLowerCase() === low) return m;
+    }
+  }
+  return DEFAULT_MODEL;
+}
+
 export function defaultConfigPath() {
   const override = process.env.CURSOR_REMOTE_CONFIG;
   if (override) return override;
@@ -66,6 +94,7 @@ export function defaultConfigPath() {
  *   grants: string[],
  *   thinkingDisplay: "off"|"indicator"|"full",
  *   wireStats: "session"|"request",
+ *   model: string,
  *   baseUrl: string,
  *   path: string,
  * } | null}
@@ -100,6 +129,7 @@ export function loadConfig(path) {
     grants,
     thinkingDisplay: coerceThinkingDisplay(thinkingRaw),
     wireStats: coerceWireStats(wireRaw),
+    model: coerceModel(raw.model),
     httpProxy: String(proxy.http || raw.httpProxy || ""),
     httpsProxy: String(proxy.https || raw.httpsProxy || ""),
     noProxy: String(proxy.no || raw.noProxy || "127.0.0.1,localhost"),

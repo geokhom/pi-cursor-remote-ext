@@ -18,7 +18,14 @@
  */
 
 import { BridgeClient, runPromptViaBridge, grantsFromEnv, emptyUsage } from "./bridge-client.js";
-import { resolveBridgeConnection, loadConfig } from "./config.js";
+import {
+  resolveBridgeConnection,
+  loadConfig,
+  coerceModel,
+  MODEL_VALUES,
+  MODEL_DISPLAY_NAMES,
+  DEFAULT_MODEL,
+} from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
 import { takeFollowUp } from "./result-stash.js";
 import { displayToolNames } from "./tool-display.js";
@@ -105,7 +112,7 @@ function streamSimple(model, context, options) {
           content: [],
           api: model?.api || "cursor-remote-bridge",
           provider: model?.provider || "cursor-remote",
-          model: model?.id || "cursor-remote",
+          model: model?.id || DEFAULT_MODEL,
           usage: emptyUsage(),
           stopReason: "pending",
           timestamp: Date.now(),
@@ -193,7 +200,7 @@ function streamSimple(model, context, options) {
         thinkingDisplay: conn.thinkingDisplay,
         wireStats: conn.wireStats,
         model: {
-          id: model?.id || "cursor-remote",
+          id: coerceModel(model?.id),
           api: model?.api || "cursor-remote-bridge",
           provider: model?.provider || "cursor-remote",
         },
@@ -211,7 +218,7 @@ function streamSimple(model, context, options) {
         content: [],
         api: "cursor-remote-bridge",
         provider: "cursor-remote",
-        model: model?.id || "cursor-remote",
+        model: model?.id || DEFAULT_MODEL,
         usage: emptyUsage(),
         stopReason: options?.signal?.aborted ? "aborted" : "error",
         errorMessage: err instanceof Error ? err.message : String(err),
@@ -256,17 +263,15 @@ export default function register(pi) {
     api: "cursor-remote-bridge",
     apiKey: "unused", // bridge auth is Unix/Bearer, not Cursor API key
     streamSimple,
-    models: [
-      {
-        id: "cursor-remote",
-        name: "Cursor Remote (stub/SDK via bridge)",
-        reasoning: thinkingDisplay !== "off",
-        input: ["text"],
-        contextWindow: 128000,
-        maxTokens: 8192,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      },
-    ],
+    models: MODEL_VALUES.map((id) => ({
+      id,
+      name: MODEL_DISPLAY_NAMES[id] || id,
+      reasoning: thinkingDisplay !== "off",
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 8192,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    })),
   });
 }
 
@@ -278,6 +283,10 @@ export {
   resolveBridgeConnection,
   coerceThinkingDisplay,
   coerceWireStats,
+  coerceModel,
+  DEFAULT_MODEL,
+  MODEL_VALUES,
+  MODEL_DISPLAY_NAMES,
 } from "./config.js";
 export {
   bindThinkingUi,
