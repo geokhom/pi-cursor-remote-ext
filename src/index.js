@@ -245,7 +245,7 @@ export default function register(pi) {
 }
 
 export { BridgeClient, runPromptViaBridge, streamSimple, grantsFromEnv, emptyUsage };
-export { formatToolArgs, formatToolResult } from "./bridge-client.js";
+export { formatToolArgs, formatToolResult, joinThinkingChunk } from "./bridge-client.js";
 export { displayToolName } from "./tool-display.js";
 export {
   loadConfig,

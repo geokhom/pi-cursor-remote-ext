@@ -24,6 +24,26 @@ import {
 } from "./thinking-indicator.js";
 
 /**
+ * Join thinking chunks into flowing prose (SDK often sends short lines / CR).
+ * @param {string} buf
+ * @param {string} chunk
+ */
+export function joinThinkingChunk(buf, chunk) {
+  if (!chunk) return buf || "";
+  let c = String(chunk).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Soft line wraps → spaces; keep rare blank-line paragraph breaks
+  c = c.replace(/([^\n])\n(?!\n)/g, "$1 ").replace(/\n{3,}/g, "\n\n");
+  c = c.replace(/[ \t]{2,}/g, " ");
+  if (!buf) return c.replace(/^\s+/, "");
+  const right = c.replace(/^\s+/, "");
+  if (!right) return buf;
+  if (/\s$/.test(buf)) return buf + right;
+  // Word / sentence boundary across soft thinking_end cycles
+  if (/[\w.!?)\]"'…]$/u.test(buf) && /^[\w("'([`]/u.test(right)) return `${buf} ${right}`;
+  return buf + right;
+}
+
+/**
  * @typedef {object} BridgeClientOptions
  * @property {string} [baseUrl] TCP base, e.g. http://127.0.0.1:PORT
  * @property {string} [token] Bearer token (required for TCP mode)
@@ -534,13 +554,16 @@ export async function runPromptViaBridge(client, text, opts = {}) {
         partial: output,
       });
     }
-    thinkingBuf += chunk;
+    const before = thinkingBuf;
+    thinkingBuf = joinThinkingChunk(thinkingBuf, chunk);
+    const delta = thinkingBuf.slice(before.length);
+    if (!delta) return;
     output.content[thinkingIndex].thinking = thinkingBuf;
     bumpUsage();
     stream.push({
       type: "thinking_delta",
       contentIndex: thinkingIndex,
-      delta: chunk,
+      delta,
       partial: output,
     });
   };
@@ -627,8 +650,12 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     } else if (ev.type === "thinking_delta" && typeof ev.text === "string") {
       appendThinking(ev.text);
     } else if (ev.type === "thinking_end") {
-      endThinkingBlock();
-      notifyIndicator(false);
+      // Soft end: keep the same thinking block open so consecutive SDK
+      // thoughts coalesce (pi joins separate blocks with \n\n → "column").
+      // Hard-close on assistant / tool / terminal below.
+      if (thinkingDisplay === "indicator") {
+        // Stay lit until answer/tools; brief end pulses would flicker.
+      }
     } else if (ev.type === "assistant_delta" && typeof ev.text === "string") {
       appendText(ev.text);
     } else if (ev.type === "assistant_message" && typeof ev.text === "string") {
