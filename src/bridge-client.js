@@ -37,9 +37,17 @@ export function joinThinkingChunk(buf, chunk) {
   if (!buf) return c.replace(/^\s+/, "");
   const right = c.replace(/^\s+/, "");
   if (!right) return buf;
+  // Cumulative snapshot or exact/replay duplicate (ignore tiny suffix matches)
+  if (right.startsWith(buf)) return right;
+  if (right === buf || (right.length >= 8 && buf.endsWith(right))) return buf;
   if (/\s$/.test(buf)) return buf + right;
-  // Word / sentence boundary across soft thinking_end cycles
-  if (/[\w.!?)\]"'…]$/u.test(buf) && /^[\w("'([`]/u.test(right)) return `${buf} ${right}`;
+  // Letter/digit/punct boundary (Cyrillic + «»); insert space across chunks
+  if (
+    /[\p{L}\p{N}.!?)\]"'…»]$/u.test(buf) &&
+    /^[\p{L}\p{N}("'([`«]/u.test(right)
+  ) {
+    return `${buf} ${right}`;
+  }
   return buf + right;
 }
 
