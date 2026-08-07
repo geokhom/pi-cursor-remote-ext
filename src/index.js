@@ -20,7 +20,7 @@
 import { BridgeClient, runPromptViaBridge, grantsFromEnv, emptyUsage } from "./bridge-client.js";
 import { resolveBridgeConnection, loadConfig } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
-import { takeFollowUpText } from "./result-stash.js";
+import { takeFollowUp } from "./result-stash.js";
 import { displayToolNames } from "./tool-display.js";
 import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js";
 
@@ -97,12 +97,12 @@ function streamSimple(model, context, options) {
         _piRef.setActiveTools(merged);
       }
 
-      const followUp = takeFollowUpText();
+      const followUp = takeFollowUp();
       if (followUp != null) {
-        // Second turn after shadow tools: final answer below tool panels.
+        // Second turn after shadow tools: thinking + answer below tool panels.
         const output = {
           role: "assistant",
-          content: [{ type: "text", text: "" }],
+          content: [],
           api: model?.api || "cursor-remote-bridge",
           provider: model?.provider || "cursor-remote",
           model: model?.id || "cursor-remote",
@@ -111,22 +111,47 @@ function streamSimple(model, context, options) {
           timestamp: Date.now(),
         };
         stream.push({ type: "start", partial: output });
-        stream.push({ type: "text_start", contentIndex: 0, partial: output });
-        output.content[0].text = followUp;
-        output.usage.output = Math.max(1, Math.ceil(followUp.length / 4));
+        let n = 0;
+        if (followUp.thinking) {
+          const idx = output.content.length;
+          output.content.push({ type: "thinking", thinking: "" });
+          stream.push({ type: "thinking_start", contentIndex: idx, partial: output });
+          output.content[idx].thinking = followUp.thinking;
+          n += followUp.thinking.length;
+          stream.push({
+            type: "thinking_delta",
+            contentIndex: idx,
+            delta: followUp.thinking,
+            partial: output,
+          });
+          stream.push({
+            type: "thinking_end",
+            contentIndex: idx,
+            content: followUp.thinking,
+            partial: output,
+          });
+        }
+        if (followUp.text) {
+          const idx = output.content.length;
+          output.content.push({ type: "text", text: "" });
+          stream.push({ type: "text_start", contentIndex: idx, partial: output });
+          output.content[idx].text = followUp.text;
+          n += followUp.text.length;
+          stream.push({
+            type: "text_delta",
+            contentIndex: idx,
+            delta: followUp.text,
+            partial: output,
+          });
+          stream.push({
+            type: "text_end",
+            contentIndex: idx,
+            content: followUp.text,
+            partial: output,
+          });
+        }
+        output.usage.output = Math.max(1, Math.ceil(n / 4));
         output.usage.totalTokens = output.usage.output;
-        stream.push({
-          type: "text_delta",
-          contentIndex: 0,
-          delta: followUp,
-          partial: output,
-        });
-        stream.push({
-          type: "text_end",
-          contentIndex: 0,
-          content: followUp,
-          partial: output,
-        });
         output.stopReason = "stop";
         stream.push({ type: "done", reason: "stop", message: output });
         stream.end();
@@ -256,4 +281,7 @@ export {
   bindThinkingUi,
   showThinkingIndicator,
   clearThinkingIndicator,
+  setWireStatus,
+  clearWireStatus,
+  formatBytes,
 } from "./thinking-indicator.js";

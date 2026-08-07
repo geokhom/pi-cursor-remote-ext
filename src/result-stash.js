@@ -3,9 +3,10 @@
  * instantly and paint ToolExecutionComponent (colored bg + result text).
  * Results are local — already on the contour machine; no proxy fetch.
  *
- * Also holds deferred assistant text for a follow-up stream turn so the TUI
- * shows tools above the final answer (pi always paints text above tool blocks
- * within a single assistant message).
+ * Also holds deferred assistant text/thinking for a follow-up stream turn so
+ * the TUI shows tools above the final answer. Pi always paints AssistantMessage
+ * (all thinking+text) above sibling ToolExecution panels — post-tool thinking
+ * must not stay in the first message or it appears above the tool UI.
  *
  * State lives on globalThis (Symbol.for) so jiti/static vs dynamic imports of
  * this module still share one Map — otherwise stash writes land in one
@@ -14,6 +15,7 @@
 
 /**
  * @typedef {{ ok: boolean, content: unknown, name?: string, displayName?: string }} Stashed
+ * @typedef {{ text?: string, thinking?: string }} FollowUp
  */
 
 const STATE_KEY = Symbol.for("pi-cursor-remote.result-stash.v1");
@@ -22,7 +24,7 @@ const STATE_KEY = Symbol.for("pi-cursor-remote.result-stash.v1");
  * @returns {{
  *   stash: Map<string, Stashed>,
  *   idsByName: Map<string, string[]>,
- *   followUpText: string | null,
+ *   followUp: FollowUp | null,
  * }}
  */
 function state() {
@@ -31,10 +33,19 @@ function state() {
     g[STATE_KEY] = {
       stash: new Map(),
       idsByName: new Map(),
-      followUpText: null,
+      followUp: null,
     };
   }
-  return g[STATE_KEY];
+  // Migrate older shape (followUpText) if a long-lived process still has it
+  const s = g[STATE_KEY];
+  if (s.followUp === undefined) {
+    s.followUp =
+      typeof s.followUpText === "string" && s.followUpText.trim()
+        ? { text: s.followUpText.trim() }
+        : null;
+    delete s.followUpText;
+  }
+  return s;
 }
 
 /**
@@ -118,25 +129,51 @@ export function clearToolResults() {
   s.idsByName.clear();
 }
 
+/**
+ * @param {FollowUp | null | undefined} parts
+ */
+export function setFollowUp(parts) {
+  const text = typeof parts?.text === "string" ? parts.text.trim() : "";
+  const thinking = typeof parts?.thinking === "string" ? parts.thinking.trim() : "";
+  state().followUp =
+    text || thinking
+      ? {
+          ...(text ? { text } : {}),
+          ...(thinking ? { thinking } : {}),
+        }
+      : null;
+}
+
 /** @param {string} text */
 export function setFollowUpText(text) {
-  state().followUpText = typeof text === "string" && text.trim() ? text : null;
+  setFollowUp({ text });
+}
+
+/** @returns {FollowUp | null} */
+export function takeFollowUp() {
+  const s = state();
+  const f = s.followUp;
+  s.followUp = null;
+  return f;
 }
 
 /** @returns {string | null} */
 export function takeFollowUpText() {
-  const s = state();
-  const t = s.followUpText;
-  s.followUpText = null;
-  return t;
+  const f = takeFollowUp();
+  return f?.text ?? null;
 }
 
 /** @returns {boolean} */
 export function hasFollowUpText() {
-  const t = state().followUpText;
-  return t != null && t.length > 0;
+  const f = state().followUp;
+  return !!(f && (f.text || f.thinking));
+}
+
+/** @returns {FollowUp | null} */
+export function peekFollowUp() {
+  return state().followUp;
 }
 
 export function peekFollowUpText() {
-  return state().followUpText;
+  return state().followUp?.text ?? null;
 }

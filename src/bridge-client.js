@@ -15,12 +15,15 @@ import {
   stashToolResult,
   clearToolResults,
   trackCallId,
+  setFollowUp,
   setFollowUpText,
 } from "./result-stash.js";
 import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT } from "./config.js";
 import {
   showThinkingIndicator,
   clearThinkingIndicator,
+  setWireStatus,
+  clearWireStatus,
 } from "./thinking-indicator.js";
 
 /**
@@ -37,9 +40,9 @@ export function joinThinkingChunk(buf, chunk) {
   if (!buf) return c.replace(/^\s+/, "");
   const right = c.replace(/^\s+/, "");
   if (!right) return buf;
-  // Cumulative snapshot or exact/replay duplicate (ignore tiny suffix matches)
+  // Cumulative snapshot or exact/replay duplicate (ignore tiny punctuation-only)
   if (right.startsWith(buf)) return right;
-  if (right === buf || (right.length >= 8 && buf.endsWith(right))) return buf;
+  if (right === buf || (right.length >= 4 && buf.endsWith(right))) return buf;
   if (/\s$/.test(buf)) return buf + right;
   // Letter/digit/punct boundary (Cyrillic + «»); insert space across chunks
   if (
@@ -451,8 +454,9 @@ export function emptyUsage() {
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
   clearToolResults();
-  setFollowUpText("");
+  setFollowUp(null);
   clearThinkingIndicator();
+  clearWireStatus();
 
   const thinkingDisplay = coerceThinkingDisplay(
     opts.thinkingDisplay ?? THINKING_DISPLAY_DEFAULT
@@ -483,6 +487,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   };
 
   const model = opts.model || {};
+  const promptChars = typeof text === "string" ? text.length : 0;
   const output = {
     role: "assistant",
     content: [],
@@ -493,6 +498,8 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     stopReason: "pending",
     timestamp: Date.now(),
   };
+  output.usage.input = Math.max(1, Math.ceil(promptChars / 4));
+  output.usage.totalTokens = output.usage.input;
   stream.push({ type: "start", partial: output });
 
   let grants = [];
@@ -509,18 +516,52 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   let sawToolCall = false;
   /** Text after first tool → follow-up assistant message (below tool panels). */
   let deferredText = "";
+  /** Post-tool thinking → follow-up turn (same reason as deferredText). */
+  let deferredThinking = "";
+  /** @type {number | null} */
+  let firstOutAt = null;
+  const markOut = () => {
+    if (firstOutAt == null) firstOutAt = Date.now();
+  };
+
+  const outChars = () =>
+    deferredText.length +
+    deferredThinking.length +
+    thinkingBuf.length +
+    output.content.reduce((acc, c) => {
+      if (c.type === "text") return acc + (c.text?.length || 0);
+      if (c.type === "thinking") return acc + (c.thinking?.length || 0);
+      return acc;
+    }, 0);
 
   const bumpUsage = () => {
-    const n =
-      deferredText.length +
-      thinkingBuf.length +
-      output.content.reduce((acc, c) => {
-        if (c.type === "text") return acc + (c.text?.length || 0);
-        if (c.type === "thinking") return acc + (c.thinking?.length || 0);
-        return acc;
-      }, 0);
+    const n = outChars();
     output.usage.output = Math.max(1, Math.ceil(n / 4));
     output.usage.totalTokens = output.usage.input + output.usage.output;
+  };
+
+  /** @param {object} ev */
+  const applyWireStats = (ev) => {
+    const up = Number(ev.proxy_up_bytes) || 0;
+    const down = Number(ev.proxy_down_bytes) || 0;
+    const gets = Number(ev.proxy_gets) || 0;
+    const durationMs = Number(ev.duration_ms) || 0;
+    const chars = outChars();
+    let cps = 0;
+    if (firstOutAt != null) {
+      const elapsed = Math.max(1, Date.now() - firstOutAt);
+      cps = (chars * 1000) / elapsed;
+    } else if (durationMs > 0 && chars > 0) {
+      cps = (chars * 1000) / durationMs;
+    }
+    setWireStatus({
+      proxy_up_bytes: up,
+      proxy_down_bytes: down,
+      proxy_gets: gets,
+      chars_per_sec: cps,
+      duration_ms: durationMs,
+      out_chars: chars,
+    });
   };
 
   const endThinkingBlock = () => {
@@ -551,6 +592,14 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   /** @param {string} chunk */
   const appendThinking = (chunk) => {
     if (!chunk || thinkingDisplay !== "full") return;
+    // After tools: defer — pi paints all thinking inside AssistantMessage
+    // above sibling ToolExecution panels.
+    if (sawToolCall) {
+      deferredThinking = joinThinkingChunk(deferredThinking, chunk);
+      markOut();
+      bumpUsage();
+      return;
+    }
     if (thinkingIndex == null) {
       endTextBlock();
       thinkingIndex = output.content.length;
@@ -567,6 +616,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     const delta = thinkingBuf.slice(before.length);
     if (!delta) return;
     output.content[thinkingIndex].thinking = thinkingBuf;
+    markOut();
     bumpUsage();
     stream.push({
       type: "thinking_delta",
@@ -585,6 +635,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     // renders it under the colored tool panels (same-message text always sits above).
     if (sawToolCall) {
       deferredText += chunk;
+      markOut();
       bumpUsage();
       return;
     }
@@ -596,6 +647,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     }
     textBuf += chunk;
     output.content[textIndex].text = textBuf;
+    markOut();
     bumpUsage();
     stream.push({
       type: "text_delta",
@@ -644,7 +696,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     if (ev.type === "thinking_start") {
       if (thinkingDisplay === "indicator") {
         notifyIndicator(true);
-      } else if (thinkingDisplay === "full" && thinkingIndex == null) {
+      } else if (
+        thinkingDisplay === "full" &&
+        thinkingIndex == null &&
+        !sawToolCall
+      ) {
         endTextBlock();
         thinkingIndex = output.content.length;
         thinkingBuf = "";
@@ -699,10 +755,12 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       endThinkingBlock();
       notifyIndicator(false);
       output.stopReason = sawToolCall ? "toolUse" : "stop";
+      applyWireStats(ev);
     } else if (ev.type === "run_error") {
       endThinkingBlock();
       notifyIndicator(false);
       output.stopReason = "error";
+      applyWireStats(ev);
       const kind = ev.kind || "run_error";
       if (kind === "policy") {
         const tn = ev.tool_name || "built-in/unknown";
@@ -744,8 +802,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   endTextBlock();
   notifyIndicator(false);
 
-  if (deferredText.trim()) {
-    setFollowUpText(deferredText);
+  if (deferredText.trim() || deferredThinking.trim()) {
+    setFollowUp({
+      text: deferredText.trim() || undefined,
+      thinking: deferredThinking.trim() || undefined,
+    });
   }
 
   if (output.stopReason === "pending") {
@@ -753,11 +814,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     output.errorMessage = "stream ended without terminal";
   }
   if (output.stopReason === "error" || output.stopReason === "aborted") {
-    setFollowUpText(""); // cancel follow-up on error
+    setFollowUp(null); // cancel follow-up on error
     stream.push({ type: "error", reason: output.stopReason, error: output });
   } else {
-    // toolUse → agent runs shadow tools (stashed results); if follow-up text
-    // exists, terminate:false continues into a second text-only stream turn.
+    // toolUse → agent runs shadow tools (stashed results); if follow-up
+    // exists, terminate:false continues into a second stream turn below tools.
     const reason =
       output.stopReason === "toolUse" || sawToolCall ? "toolUse" : "stop";
     output.stopReason = reason;

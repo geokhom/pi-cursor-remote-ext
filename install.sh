@@ -13,7 +13,7 @@ set -euo pipefail
 REPO="geokhom/pi-cursor-remote-ext"
 PKG_NAME="pi-cursor-remote"
 NPM_SPEC="npm:${PKG_NAME}"
-DEFAULT_VERSION="0.1.29"
+DEFAULT_VERSION="0.1.31"
 AGENT_DIR="${PI_AGENT_DIR:-${HOME}/.pi/agent}"
 NPM_PREFIX="${AGENT_DIR}/npm"
 SETTINGS="${AGENT_DIR}/settings.json"
