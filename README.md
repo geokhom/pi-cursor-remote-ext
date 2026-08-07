@@ -7,6 +7,28 @@ Public install artifact: [geokhom/pi-cursor-remote-ext](https://github.com/geokh
 
 ## Install
 
+### Contour (recommended): one-liner GET via corp proxy
+
+```bash
+export http_proxy="${http_proxy:-http://proxy.example:3128}"
+export https_proxy="${https_proxy:-$http_proxy}"
+
+curl -fsSL -x "$http_proxy" \
+  https://raw.githubusercontent.com/geokhom/pi-cursor-remote-ext/main/install.sh | bash
+```
+
+Скрипт: GET Release `.tgz` → `npm install --prefix ~/.pi/agent/npm` → в `settings.json` пишет `"npm:pi-cursor-remote"` (без `pi install npm:…`, чтобы не ходить в registry).  
+Путь на диске: `~/.pi/agent/npm/node_modules/pi-cursor-remote`.
+
+Опции:
+
+```bash
+PI_CURSOR_REMOTE_VERSION=0.1.19 bash   # пин версии (иначе latest Release, fallback 0.1.19)
+# http_proxy / https_proxy — как обычно для curl
+```
+
+Обновление: тот же one-liner (или с новым `PI_CURSOR_REMOTE_VERSION`).
+
 ### A. From contour-bridge zip / local tree (no network)
 
 ```bash
@@ -15,39 +37,21 @@ pi install ./pi-cursor-remote
 pi install -l ./pi-cursor-remote
 ```
 
-В `settings.json` попадёт локальный путь (не `npm:…`). Для единого стиля с другими пакетами предпочтителен путь **B**.
+В `settings.json` попадёт локальный путь (не `npm:…`).
 
-### B. Contour: curl GET → `~/.pi/agent/npm` (как `npm:…`)
+### B. Manual: curl tarball + npm prefix
 
-Остальные пакеты вида `npm:<name>` лежат в `~/.pi/agent/npm/node_modules/<name>`. Тот же layout для этого расширения — без обращения к npm registry (только GET tarball через корп-прокси):
+То же, что делает `install.sh`:
 
 ```bash
-export http_proxy="${http_proxy:-http://proxy.example:3128}"
-export https_proxy="${https_proxy:-$http_proxy}"
-
 VER=0.1.19
 TGZ="pi-cursor-remote-${VER}.tgz"
 curl -fsSL -x "$http_proxy" -o "/tmp/${TGZ}" \
   "https://github.com/geokhom/pi-cursor-remote-ext/releases/download/v${VER}/${TGZ}"
-
 mkdir -p ~/.pi/agent/npm
 npm install --prefix ~/.pi/agent/npm "/tmp/${TGZ}"
-# → ~/.pi/agent/npm/node_modules/pi-cursor-remote
-
-pi remove package 2>/dev/null || true   # если раньше ставили из распакованного package/
-pi install npm:pi-cursor-remote         # в settings → "npm:pi-cursor-remote"
+# затем добавить "npm:pi-cursor-remote" в ~/.pi/agent/settings.json
 ```
-
-Если `pi install npm:…` тянет registry (POST) — пакет уже на диске; достаточно вручную добавить в `~/.pi/agent/settings.json`:
-
-```json
-"packages": [
-  "npm:pi-mcp-adapter",
-  "npm:pi-cursor-remote"
-]
-```
-
-Обновление: новый GET tarball → снова `npm install --prefix ~/.pi/agent/npm /tmp/….tgz` (перезапишет `node_modules/pi-cursor-remote`).
 
 ### C. npm registry (когда пакет опубликован и GET к registry разрешён)
 
@@ -56,6 +60,7 @@ pi install npm:pi-cursor-remote         # в settings → "npm:pi-cursor-remote"
 ```bash
 export http_proxy=… https_proxy=…
 pi install npm:pi-cursor-remote
+pi update npm:pi-cursor-remote   # обычные обновления через registry
 ```
 
 ### D. git clone (публичный lean repo)
