@@ -19,6 +19,7 @@
 
 import { BridgeClient, runPromptViaBridge, grantsFromEnv, emptyUsage } from "./bridge-client.js";
 import { resolveBridgeConnection, loadConfig } from "./config.js";
+import { registerShadowTools } from "./shadow-tools.js";
 
 function lastUserText(context) {
   const messages = context?.messages || [];
@@ -73,10 +74,23 @@ function createLocalStream() {
   };
 }
 
+/**
+ * Ensure shadow tools are active for this stream (model_select may have been skipped).
+ * @param {import('./types.js').ExtensionAPI | null} pi
+ */
+let _piRef = null;
+
 function streamSimple(model, context, options) {
   const stream = createLocalStream();
   (async () => {
     try {
+      if (_piRef && typeof _piRef.setActiveTools === "function") {
+        const { displayToolNames } = await import("./tool-display.js");
+        const shadow = displayToolNames();
+        const cur = _piRef.getActiveTools?.() || [];
+        const merged = [...new Set([...cur.filter((n) => !shadow.includes(n)), ...shadow])];
+        _piRef.setActiveTools(merged);
+      }
       const conn = resolveBridgeConnection();
       const client = new BridgeClient({
         baseUrl: conn.baseUrl,
@@ -138,8 +152,12 @@ export default function register(pi) {
   if (!pi || typeof pi.registerProvider !== "function") {
     throw new Error("pi.registerProvider required (ExtensionAPI)");
   }
+  _piRef = pi;
   const cfg = loadConfig();
   const conn = resolveBridgeConnection();
+  // Shadow tools: display names without contour__; return stashed bridge results
+  // so TUI gets colored ToolExecutionComponent + local result text.
+  registerShadowTools(pi);
   // pi requires baseUrl when models[] is set; real traffic uses BridgeClient
   const baseUrl = conn.baseUrl || cfg?.baseUrl || "http://127.0.0.1:18765";
   pi.registerProvider("cursor-remote", {
@@ -165,4 +183,5 @@ export default function register(pi) {
 
 export { BridgeClient, runPromptViaBridge, streamSimple, grantsFromEnv, emptyUsage };
 export { formatToolArgs, formatToolResult } from "./bridge-client.js";
+export { displayToolName } from "./tool-display.js";
 export { loadConfig, resolveBridgeConnection } from "./config.js";

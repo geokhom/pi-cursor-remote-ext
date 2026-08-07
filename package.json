@@ -1,10 +1,15 @@
 {
   "name": "pi-cursor-remote",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "private": true,
   "type": "module",
   "description": "Level A thin pi extension: local-bridge client (Cursor tools stay on bridge)",
-  "keywords": ["pi-package", "pi", "cursor", "contour"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "cursor",
+    "contour"
+  ],
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
@@ -22,7 +27,9 @@
     "README.md"
   ],
   "pi": {
-    "extensions": ["./src/index.js"]
+    "extensions": [
+      "./src/index.js"
+    ]
   },
   "engines": {
     "node": ">=18"

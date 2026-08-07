@@ -310,6 +310,7 @@ export function formatToolArgs(args) {
 
 /**
  * Format tool result preview for TUI.
+ * Unwraps common {output|stdout|content|text|result|message} shapes.
  * @param {unknown} content
  * @param {boolean} [ok]
  */
@@ -317,12 +318,35 @@ export function formatToolResult(content, ok = true) {
   let body = "";
   if (typeof content === "string") {
     body = content;
-  } else if (content != null) {
-    try {
-      body = JSON.stringify(content, null, 0);
-    } catch {
-      body = String(content);
+  } else if (Array.isArray(content)) {
+    body = content
+      .map((b) => {
+        if (typeof b === "string") return b;
+        if (b && typeof b === "object" && typeof b.text === "string") return b.text;
+        try {
+          return JSON.stringify(b);
+        } catch {
+          return String(b);
+        }
+      })
+      .join("\n");
+  } else if (content != null && typeof content === "object") {
+    const o = /** @type {Record<string, unknown>} */ (content);
+    for (const k of ["output", "stdout", "text", "message", "result", "content"]) {
+      if (typeof o[k] === "string") {
+        body = o[k];
+        break;
+      }
     }
+    if (!body) {
+      try {
+        body = JSON.stringify(content, null, 0);
+      } catch {
+        body = String(content);
+      }
+    }
+  } else if (content != null) {
+    body = String(content);
   }
   if (body.length > 4000) body = body.slice(0, 4000) + "\n…";
   if (!ok && !body) body = "(failed)";
@@ -345,12 +369,11 @@ export function emptyUsage() {
 
 /**
  * Map bridge SSE events → pi-ai-like stream pushes (no pi-ai dependency).
- * Tools are executed by the bridge; we surface assistant text + tool traces live.
  *
- * Tool visibility: emit as assistant text (not toolCall blocks) so pi does not
- * try to re-execute contour__* as local tools. Format mirrors local bash UX:
- *   $ contour__shell <args>
- *   <result>
+ * Tools: emit toolcall_* with display names (no contour__ prefix). Shadow tools
+ * registered by the extension return stashed local results so pi paints
+ * ToolExecutionComponent (colored success/error + result text) without
+ * re-running work or fetching via corp proxy.
  *
  * @param {BridgeClient} client
  * @param {string} text
@@ -366,6 +389,11 @@ export function emptyUsage() {
  * }} [opts]
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
+  const { displayToolName } = await import("./tool-display.js");
+  const { stashToolResult, clearToolResults } = await import("./result-stash.js");
+
+  clearToolResults();
+
   const pushed = [];
   const stream = {
     push(ev) {
@@ -383,7 +411,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const model = opts.model || {};
   const output = {
     role: "assistant",
-    content: [{ type: "text", text: "" }],
+    content: [],
     api: model.api || "cursor-remote-bridge",
     provider: model.provider || "cursor-remote",
     model: model.id || "cursor-remote",
@@ -392,28 +420,83 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     timestamp: Date.now(),
   };
   stream.push({ type: "start", partial: output });
-  stream.push({ type: "text_start", contentIndex: 0, partial: output });
 
   let grants = [];
   if (opts.applyGrants !== false) {
     grants = await applyEnvGrants(client, opts.env || process.env);
   }
 
+  /** @type {number | null} */
+  let textIndex = null;
   let textBuf = "";
-  /** Pending tool_call lines keyed by call_id (awaiting tool_executed). */
-  const pendingTools = new Map();
+  let sawToolCall = false;
+
+  const bumpUsage = () => {
+    const n = output.content.reduce((acc, c) => {
+      if (c.type === "text") return acc + (c.text?.length || 0);
+      return acc;
+    }, 0);
+    output.usage.output = Math.max(1, Math.ceil(n / 4));
+    output.usage.totalTokens = output.usage.input + output.usage.output;
+  };
 
   /** @param {string} chunk */
   const appendText = (chunk) => {
     if (!chunk) return;
+    if (textIndex == null) {
+      textIndex = output.content.length;
+      textBuf = "";
+      output.content.push({ type: "text", text: "" });
+      stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
+    }
     textBuf += chunk;
-    output.content[0].text = textBuf;
-    output.usage.output = Math.max(1, Math.ceil(textBuf.length / 4));
-    output.usage.totalTokens = output.usage.input + output.usage.output;
+    output.content[textIndex].text = textBuf;
+    bumpUsage();
     stream.push({
       type: "text_delta",
-      contentIndex: 0,
+      contentIndex: textIndex,
       delta: chunk,
+      partial: output,
+    });
+  };
+
+  /** Close current text block so the next toolCall gets its own contentIndex. */
+  const endTextBlock = () => {
+    if (textIndex == null) return;
+    stream.push({
+      type: "text_end",
+      contentIndex: textIndex,
+      content: textBuf,
+      partial: output,
+    });
+    textIndex = null;
+    textBuf = "";
+  };
+
+  /**
+   * @param {string} wireName
+   * @param {string} callId
+   * @param {Record<string, unknown>} args
+   */
+  const emitToolCall = (wireName, callId, args) => {
+    endTextBlock();
+    const name = displayToolName(wireName);
+    const id = callId || `call-${output.content.length}`;
+    const contentIndex = output.content.length;
+    const toolCall = {
+      type: "toolCall",
+      id,
+      name,
+      arguments: args && typeof args === "object" ? args : {},
+    };
+    output.content.push(toolCall);
+    sawToolCall = true;
+    bumpUsage();
+    stream.push({ type: "toolcall_start", contentIndex, partial: output });
+    stream.push({
+      type: "toolcall_end",
+      contentIndex,
+      toolCall,
       partial: output,
     });
   };
@@ -424,29 +507,26 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     if (ev.type === "assistant_delta" && typeof ev.text === "string") {
       appendText(ev.text);
     } else if (ev.type === "assistant_message" && typeof ev.text === "string") {
-      // Full message replace (rare); if we already have tool traces, append.
       if (!textBuf) {
         appendText(ev.text);
       } else if (!textBuf.includes(ev.text)) {
         appendText((textBuf.endsWith("\n") ? "" : "\n") + ev.text);
       }
     } else if (ev.type === "tool_call") {
-      const name = typeof ev.name === "string" ? ev.name : "tool";
+      const wireName = typeof ev.name === "string" ? ev.name : "tool";
       const callId = typeof ev.call_id === "string" ? ev.call_id : "";
-      const args = ev.arguments ?? {};
-      const argLine = formatToolArgs(args);
-      const line =
-        `\n$ ${name}` + (argLine ? ` ${argLine}` : "") + "\n";
-      if (callId) pendingTools.set(callId, { name, args });
-      appendText(line);
+      const args =
+        ev.arguments && typeof ev.arguments === "object" ? ev.arguments : {};
+      emitToolCall(wireName, callId, /** @type {Record<string, unknown>} */ (args));
     } else if (ev.type === "tool_executed") {
       const callId = typeof ev.call_id === "string" ? ev.call_id : "";
-      if (callId) pendingTools.delete(callId);
-      const body = formatToolResult(ev.content, ev.ok !== false);
-      const prefix = ev.ok === false ? "! " : "";
-      appendText(prefix + body + (body.endsWith("\n") ? "" : "\n"));
+      stashToolResult(callId, {
+        ok: ev.ok !== false,
+        content: ev.content,
+        name: typeof ev.name === "string" ? ev.name : undefined,
+      });
     } else if (ev.type === "run_finished") {
-      output.stopReason = "stop";
+      output.stopReason = sawToolCall ? "toolUse" : "stop";
     } else if (ev.type === "run_error") {
       output.stopReason = "error";
       const kind = ev.kind || "run_error";
@@ -458,7 +538,9 @@ export async function runPromptViaBridge(client, text, opts = {}) {
           : `policy: blocked tool "${tn}" — use only contour__* tools ` +
             "(list_dir/read_file/write_file/mkdir/delete_path/shell/ping)";
       } else {
-        output.errorMessage = kind;
+        output.errorMessage = ev.message
+          ? `${kind}: ${ev.message}`
+          : kind;
       }
     } else if (ev.type === "session_end") {
       output.stopReason = "error";
@@ -478,21 +560,20 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   await client.prompt(text, opts.requestId);
 
   const events = await collectPromise;
+  endTextBlock();
 
   if (output.stopReason === "pending") {
     output.stopReason = "error";
     output.errorMessage = "stream ended without terminal";
   }
-  stream.push({
-    type: "text_end",
-    contentIndex: 0,
-    content: output.content[0].text,
-    partial: output,
-  });
   if (output.stopReason === "error" || output.stopReason === "aborted") {
     stream.push({ type: "error", reason: output.stopReason, error: output });
   } else {
-    stream.push({ type: "done", reason: output.stopReason, message: output });
+    // toolUse → agent runs shadow tools (stashed results) then stops (terminate:true).
+    const reason =
+      output.stopReason === "toolUse" || sawToolCall ? "toolUse" : "stop";
+    output.stopReason = reason;
+    stream.push({ type: "done", reason, message: output });
   }
   stream.end();
   return { stream, events, output, grants };
