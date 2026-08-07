@@ -18,7 +18,7 @@ import {
   setFollowUp,
   setFollowUpText,
 } from "./result-stash.js";
-import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT } from "./config.js";
+import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT, coerceWireStats, WIRE_STATS_DEFAULT } from "./config.js";
 import {
   showThinkingIndicator,
   clearThinkingIndicator,
@@ -449,6 +449,7 @@ export function emptyUsage() {
  *   timeoutMs?: number,
  *   model?: { id?: string, api?: string, provider?: string },
  *   thinkingDisplay?: "off"|"indicator"|"full",
+ *   wireStats?: "session"|"request",
  *   onThinkingIndicator?: (active: boolean) => void,
  * }} [opts]
  */
@@ -461,6 +462,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const thinkingDisplay = coerceThinkingDisplay(
     opts.thinkingDisplay ?? THINKING_DISPLAY_DEFAULT
   );
+  const wireStats = coerceWireStats(opts.wireStats ?? WIRE_STATS_DEFAULT);
   const notifyIndicator = (active) => {
     if (thinkingDisplay !== "indicator") return;
     if (typeof opts.onThinkingIndicator === "function") {
@@ -542,9 +544,16 @@ export async function runPromptViaBridge(client, text, opts = {}) {
 
   /** @param {object} ev */
   const applyWireStats = (ev) => {
-    const up = Number(ev.proxy_up_bytes) || 0;
-    const down = Number(ev.proxy_down_bytes) || 0;
-    const gets = Number(ev.proxy_gets) || 0;
+    const useSession = wireStats === "session";
+    const up = useSession
+      ? Number(ev.proxy_up_total) || Number(ev.proxy_up_bytes) || 0
+      : Number(ev.proxy_up_bytes) || 0;
+    const down = useSession
+      ? Number(ev.proxy_down_total) || Number(ev.proxy_down_bytes) || 0
+      : Number(ev.proxy_down_bytes) || 0;
+    const gets = useSession
+      ? Number(ev.proxy_gets_total) || Number(ev.proxy_gets) || 0
+      : Number(ev.proxy_gets) || 0;
     const durationMs = Number(ev.duration_ms) || 0;
     const chars = outChars();
     let cps = 0;
@@ -555,6 +564,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       cps = (chars * 1000) / durationMs;
     }
     setWireStatus({
+      scope: wireStats,
       proxy_up_bytes: up,
       proxy_down_bytes: down,
       proxy_gets: gets,

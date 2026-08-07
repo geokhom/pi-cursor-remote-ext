@@ -191,6 +191,7 @@ function streamSimple(model, context, options) {
         signal: options?.signal,
         env,
         thinkingDisplay: conn.thinkingDisplay,
+        wireStats: conn.wireStats,
         model: {
           id: model?.id || "cursor-remote",
           api: model?.api || "cursor-remote-bridge",
@@ -276,6 +277,7 @@ export {
   loadConfig,
   resolveBridgeConnection,
   coerceThinkingDisplay,
+  coerceWireStats,
 } from "./config.js";
 export {
   bindThinkingUi,

@@ -15,6 +15,10 @@ export const CONFIG_NAME = "cursor-remote.json";
 export const THINKING_DISPLAY_VALUES = new Set(["off", "indicator", "full"]);
 export const THINKING_DISPLAY_DEFAULT = "indicator";
 
+/** @type {ReadonlySet<string>} */
+export const WIRE_STATS_VALUES = new Set(["session", "request"]);
+export const WIRE_STATS_DEFAULT = "session";
+
 /**
  * @param {unknown} raw
  * @returns {"off"|"indicator"|"full"}
@@ -27,6 +31,22 @@ export function coerceThinkingDisplay(raw) {
     }
   }
   return THINKING_DISPLAY_DEFAULT;
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {"session"|"request"}
+ */
+export function coerceWireStats(raw) {
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    if (WIRE_STATS_VALUES.has(v)) {
+      return /** @type {"session"|"request"} */ (v);
+    }
+    if (v === "run" || v === "turn" || v === "prompt") return "request";
+    if (v === "total" || v === "cumulative" || v === "cum") return "session";
+  }
+  return WIRE_STATS_DEFAULT;
 }
 
 export function defaultConfigPath() {
@@ -45,6 +65,7 @@ export function defaultConfigPath() {
  *   localToken: string,
  *   grants: string[],
  *   thinkingDisplay: "off"|"indicator"|"full",
+ *   wireStats: "session"|"request",
  *   baseUrl: string,
  *   path: string,
  * } | null}
@@ -69,6 +90,7 @@ export function loadConfig(path) {
     : [];
   const thinkingRaw =
     raw.thinkingDisplay !== undefined ? raw.thinkingDisplay : raw.thinking_display;
+  const wireRaw = raw.wireStats !== undefined ? raw.wireStats : raw.wire_stats;
   return {
     relayUrl: String(raw.relayUrl || raw.relay_url || ""),
     bridgeToken: String(raw.bridgeToken || raw.bridge_token || ""),
@@ -77,6 +99,7 @@ export function loadConfig(path) {
     localToken: String(raw.localToken || raw.local_token || ""),
     grants,
     thinkingDisplay: coerceThinkingDisplay(thinkingRaw),
+    wireStats: coerceWireStats(wireRaw),
     httpProxy: String(proxy.http || raw.httpProxy || ""),
     httpsProxy: String(proxy.https || raw.httpsProxy || ""),
     noProxy: String(proxy.no || raw.noProxy || "127.0.0.1,localhost"),
@@ -93,6 +116,7 @@ export function loadConfig(path) {
  *   unixPath?: string,
  *   grants: string[],
  *   thinkingDisplay: "off"|"indicator"|"full",
+ *   wireStats: "session"|"request",
  *   configPath?: string,
  * }}
  */
@@ -112,6 +136,17 @@ export function resolveBridgeConnection() {
   const thinkingDisplay = coerceThinkingDisplay(
     process.env.BRIDGE_THINKING_DISPLAY || cfg?.thinkingDisplay
   );
+  const wireStats = coerceWireStats(
+    process.env.BRIDGE_WIRE_STATS || cfg?.wireStats
+  );
   // env grants still applied via grantsFromEnv in runPromptViaBridge
-  return { baseUrl, token, unixPath, grants, thinkingDisplay, configPath: cfg?.path };
+  return {
+    baseUrl,
+    token,
+    unixPath,
+    grants,
+    thinkingDisplay,
+    wireStats,
+    configPath: cfg?.path,
+  };
 }

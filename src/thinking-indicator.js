@@ -65,6 +65,7 @@ export function formatBytes(n) {
 /**
  * Footer status: proxy-visible wire traffic + optional char/s.
  * @param {{
+ *   scope?: "session"|"request",
  *   proxy_up_bytes?: number,
  *   proxy_down_bytes?: number,
  *   proxy_gets?: number,
@@ -77,7 +78,8 @@ export function setWireStatus(stats) {
   if (!uiRef || typeof uiRef.setStatus !== "function") return;
   const up = formatBytes(stats.proxy_up_bytes ?? 0);
   const down = formatBytes(stats.proxy_down_bytes ?? 0);
-  const parts = [`wire ↑${up} ↓${down}`];
+  const scope = stats.scope === "request" ? "run" : "session";
+  const parts = [`wire(${scope}) ↑${up} ↓${down}`];
   if (typeof stats.proxy_gets === "number" && stats.proxy_gets > 0) {
     parts.push(`${stats.proxy_gets} GET`);
   }
