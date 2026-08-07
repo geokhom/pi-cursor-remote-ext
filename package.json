@@ -1,0 +1,30 @@
+{
+  "name": "pi-cursor-remote",
+  "version": "0.1.19",
+  "private": true,
+  "type": "module",
+  "description": "Level A thin pi extension: local-bridge client (Cursor tools stay on bridge)",
+  "keywords": ["pi-package", "pi", "cursor", "contour"],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geokhom/pi-cursor-remote-ext.git"
+  },
+  "homepage": "https://github.com/geokhom/pi-cursor-remote-ext",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./bridge-client": "./src/bridge-client.js"
+  },
+  "files": [
+    "src/",
+    "package.json",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": ["./src/index.js"]
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
