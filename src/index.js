@@ -22,6 +22,7 @@ import { resolveBridgeConnection, loadConfig } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
 import { takeFollowUpText } from "./result-stash.js";
 import { displayToolNames } from "./tool-display.js";
+import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js";
 
 function lastUserText(context) {
   const messages = context?.messages || [];
@@ -164,6 +165,7 @@ function streamSimple(model, context, options) {
       await runPromptViaBridge(client, text, {
         signal: options?.signal,
         env,
+        thinkingDisplay: conn.thinkingDisplay,
         model: {
           id: model?.id || "cursor-remote",
           api: model?.api || "cursor-remote-bridge",
@@ -175,7 +177,9 @@ function streamSimple(model, context, options) {
         },
       });
       stream.end();
+      clearThinkingIndicator();
     } catch (err) {
+      clearThinkingIndicator();
       const msg = {
         role: "assistant",
         content: [],
@@ -204,6 +208,16 @@ export default function register(pi) {
   _piRef = pi;
   const cfg = loadConfig();
   const conn = resolveBridgeConnection();
+  const thinkingDisplay = conn.thinkingDisplay || "indicator";
+  const captureUi = (_event, ctx) => {
+    if (ctx?.ui) bindThinkingUi(ctx.ui);
+  };
+  if (typeof pi.on === "function") {
+    pi.on("session_start", captureUi);
+    pi.on("before_agent_start", (event, ctx) => {
+      captureUi(event, ctx);
+    });
+  }
   // Shadow tools: display names without contour__; return stashed bridge results
   // so TUI gets colored ToolExecutionComponent + local result text.
   registerShadowTools(pi);
@@ -220,7 +234,7 @@ export default function register(pi) {
       {
         id: "cursor-remote",
         name: "Cursor Remote (stub/SDK via bridge)",
-        reasoning: false,
+        reasoning: thinkingDisplay !== "off",
         input: ["text"],
         contextWindow: 128000,
         maxTokens: 8192,
@@ -233,4 +247,13 @@ export default function register(pi) {
 export { BridgeClient, runPromptViaBridge, streamSimple, grantsFromEnv, emptyUsage };
 export { formatToolArgs, formatToolResult } from "./bridge-client.js";
 export { displayToolName } from "./tool-display.js";
-export { loadConfig, resolveBridgeConnection } from "./config.js";
+export {
+  loadConfig,
+  resolveBridgeConnection,
+  coerceThinkingDisplay,
+} from "./config.js";
+export {
+  bindThinkingUi,
+  showThinkingIndicator,
+  clearThinkingIndicator,
+} from "./thinking-indicator.js";

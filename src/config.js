@@ -11,6 +11,24 @@ export const DEFAULT_PORT = 18765;
 export const DEFAULT_HOST = "127.0.0.1";
 export const CONFIG_NAME = "cursor-remote.json";
 
+/** @type {ReadonlySet<string>} */
+export const THINKING_DISPLAY_VALUES = new Set(["off", "indicator", "full"]);
+export const THINKING_DISPLAY_DEFAULT = "indicator";
+
+/**
+ * @param {unknown} raw
+ * @returns {"off"|"indicator"|"full"}
+ */
+export function coerceThinkingDisplay(raw) {
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    if (THINKING_DISPLAY_VALUES.has(v)) {
+      return /** @type {"off"|"indicator"|"full"} */ (v);
+    }
+  }
+  return THINKING_DISPLAY_DEFAULT;
+}
+
 export function defaultConfigPath() {
   const override = process.env.CURSOR_REMOTE_CONFIG;
   if (override) return override;
@@ -26,6 +44,7 @@ export function defaultConfigPath() {
  *   port: number,
  *   localToken: string,
  *   grants: string[],
+ *   thinkingDisplay: "off"|"indicator"|"full",
  *   baseUrl: string,
  *   path: string,
  * } | null}
@@ -48,6 +67,8 @@ export function loadConfig(path) {
   const grants = Array.isArray(raw.grants)
     ? raw.grants.map(String).filter((g) => g === "write" || g === "shell")
     : [];
+  const thinkingRaw =
+    raw.thinkingDisplay !== undefined ? raw.thinkingDisplay : raw.thinking_display;
   return {
     relayUrl: String(raw.relayUrl || raw.relay_url || ""),
     bridgeToken: String(raw.bridgeToken || raw.bridge_token || ""),
@@ -55,6 +76,7 @@ export function loadConfig(path) {
     port,
     localToken: String(raw.localToken || raw.local_token || ""),
     grants,
+    thinkingDisplay: coerceThinkingDisplay(thinkingRaw),
     httpProxy: String(proxy.http || raw.httpProxy || ""),
     httpsProxy: String(proxy.https || raw.httpsProxy || ""),
     noProxy: String(proxy.no || raw.noProxy || "127.0.0.1,localhost"),
@@ -65,7 +87,14 @@ export function loadConfig(path) {
 
 /**
  * Resolve bridge client options: env wins, then shared JSON.
- * @returns {{ baseUrl?: string, token?: string, unixPath?: string, grants: string[] }}
+ * @returns {{
+ *   baseUrl?: string,
+ *   token?: string,
+ *   unixPath?: string,
+ *   grants: string[],
+ *   thinkingDisplay: "off"|"indicator"|"full",
+ *   configPath?: string,
+ * }}
  */
 export function resolveBridgeConnection() {
   const cfg = loadConfig();
@@ -80,6 +109,9 @@ export function resolveBridgeConnection() {
     undefined;
   const grants = [];
   if (cfg?.grants?.length) grants.push(...cfg.grants);
+  const thinkingDisplay = coerceThinkingDisplay(
+    process.env.BRIDGE_THINKING_DISPLAY || cfg?.thinkingDisplay
+  );
   // env grants still applied via grantsFromEnv in runPromptViaBridge
-  return { baseUrl, token, unixPath, grants, configPath: cfg?.path };
+  return { baseUrl, token, unixPath, grants, thinkingDisplay, configPath: cfg?.path };
 }

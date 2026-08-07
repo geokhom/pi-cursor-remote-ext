@@ -17,6 +17,11 @@ import {
   trackCallId,
   setFollowUpText,
 } from "./result-stash.js";
+import { coerceThinkingDisplay, THINKING_DISPLAY_DEFAULT } from "./config.js";
+import {
+  showThinkingIndicator,
+  clearThinkingIndicator,
+} from "./thinking-indicator.js";
 
 /**
  * @typedef {object} BridgeClientOptions
@@ -412,11 +417,28 @@ export function emptyUsage() {
  *   env?: NodeJS.ProcessEnv,
  *   timeoutMs?: number,
  *   model?: { id?: string, api?: string, provider?: string },
+ *   thinkingDisplay?: "off"|"indicator"|"full",
+ *   onThinkingIndicator?: (active: boolean) => void,
  * }} [opts]
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
   clearToolResults();
   setFollowUpText("");
+  clearThinkingIndicator();
+
+  const thinkingDisplay = coerceThinkingDisplay(
+    opts.thinkingDisplay ?? THINKING_DISPLAY_DEFAULT
+  );
+  const notifyIndicator = (active) => {
+    if (thinkingDisplay !== "indicator") return;
+    if (typeof opts.onThinkingIndicator === "function") {
+      opts.onThinkingIndicator(active);
+    } else if (active) {
+      showThinkingIndicator();
+    } else {
+      clearThinkingIndicator();
+    }
+  };
 
   const pushed = [];
   const stream = {
@@ -453,6 +475,9 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   /** @type {number | null} */
   let textIndex = null;
   let textBuf = "";
+  /** @type {number | null} */
+  let thinkingIndex = null;
+  let thinkingBuf = "";
   let sawToolCall = false;
   /** Text after first tool → follow-up assistant message (below tool panels). */
   let deferredText = "";
@@ -460,17 +485,71 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const bumpUsage = () => {
     const n =
       deferredText.length +
+      thinkingBuf.length +
       output.content.reduce((acc, c) => {
         if (c.type === "text") return acc + (c.text?.length || 0);
+        if (c.type === "thinking") return acc + (c.thinking?.length || 0);
         return acc;
       }, 0);
     output.usage.output = Math.max(1, Math.ceil(n / 4));
     output.usage.totalTokens = output.usage.input + output.usage.output;
   };
 
+  const endThinkingBlock = () => {
+    if (thinkingIndex == null) return;
+    stream.push({
+      type: "thinking_end",
+      contentIndex: thinkingIndex,
+      content: thinkingBuf,
+      partial: output,
+    });
+    thinkingIndex = null;
+    thinkingBuf = "";
+  };
+
+  /** Close current text block so the next toolCall gets its own contentIndex. */
+  const endTextBlock = () => {
+    if (textIndex == null) return;
+    stream.push({
+      type: "text_end",
+      contentIndex: textIndex,
+      content: textBuf,
+      partial: output,
+    });
+    textIndex = null;
+    textBuf = "";
+  };
+
+  /** @param {string} chunk */
+  const appendThinking = (chunk) => {
+    if (!chunk || thinkingDisplay !== "full") return;
+    if (thinkingIndex == null) {
+      endTextBlock();
+      thinkingIndex = output.content.length;
+      thinkingBuf = "";
+      output.content.push({ type: "thinking", thinking: "" });
+      stream.push({
+        type: "thinking_start",
+        contentIndex: thinkingIndex,
+        partial: output,
+      });
+    }
+    thinkingBuf += chunk;
+    output.content[thinkingIndex].thinking = thinkingBuf;
+    bumpUsage();
+    stream.push({
+      type: "thinking_delta",
+      contentIndex: thinkingIndex,
+      delta: chunk,
+      partial: output,
+    });
+  };
+
   /** @param {string} chunk */
   const appendText = (chunk) => {
     if (!chunk) return;
+    endThinkingBlock();
+    notifyIndicator(false);
     // After tools started: hold final answer for a second stream turn so pi
     // renders it under the colored tool panels (same-message text always sits above).
     if (sawToolCall) {
@@ -495,26 +574,15 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     });
   };
 
-  /** Close current text block so the next toolCall gets its own contentIndex. */
-  const endTextBlock = () => {
-    if (textIndex == null) return;
-    stream.push({
-      type: "text_end",
-      contentIndex: textIndex,
-      content: textBuf,
-      partial: output,
-    });
-    textIndex = null;
-    textBuf = "";
-  };
-
   /**
    * @param {string} wireName
    * @param {string} callId
    * @param {Record<string, unknown>} args
    */
   const emitToolCall = (wireName, callId, args) => {
+    endThinkingBlock();
     endTextBlock();
+    notifyIndicator(false);
     const name = displayToolName(wireName);
     const id =
       (typeof callId === "string" && callId) ||
@@ -542,7 +610,26 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   /** @param {object} ev */
   const handleLive = (ev) => {
     if (typeof opts.onEvent === "function") opts.onEvent(ev);
-    if (ev.type === "assistant_delta" && typeof ev.text === "string") {
+    if (ev.type === "thinking_start") {
+      if (thinkingDisplay === "indicator") {
+        notifyIndicator(true);
+      } else if (thinkingDisplay === "full" && thinkingIndex == null) {
+        endTextBlock();
+        thinkingIndex = output.content.length;
+        thinkingBuf = "";
+        output.content.push({ type: "thinking", thinking: "" });
+        stream.push({
+          type: "thinking_start",
+          contentIndex: thinkingIndex,
+          partial: output,
+        });
+      }
+    } else if (ev.type === "thinking_delta" && typeof ev.text === "string") {
+      appendThinking(ev.text);
+    } else if (ev.type === "thinking_end") {
+      endThinkingBlock();
+      notifyIndicator(false);
+    } else if (ev.type === "assistant_delta" && typeof ev.text === "string") {
       appendText(ev.text);
     } else if (ev.type === "assistant_message" && typeof ev.text === "string") {
       if (sawToolCall) {
@@ -574,8 +661,12 @@ export async function runPromptViaBridge(client, text, opts = {}) {
         displayName: display,
       });
     } else if (ev.type === "run_finished") {
+      endThinkingBlock();
+      notifyIndicator(false);
       output.stopReason = sawToolCall ? "toolUse" : "stop";
     } else if (ev.type === "run_error") {
+      endThinkingBlock();
+      notifyIndicator(false);
       output.stopReason = "error";
       const kind = ev.kind || "run_error";
       if (kind === "policy") {
@@ -591,6 +682,8 @@ export async function runPromptViaBridge(client, text, opts = {}) {
           : kind;
       }
     } else if (ev.type === "session_end") {
+      endThinkingBlock();
+      notifyIndicator(false);
       output.stopReason = "error";
       const detail = ev.detail ? `:${ev.detail}` : "";
       output.errorMessage = `session_end:${ev.reason || ""}${detail}`;
@@ -612,7 +705,9 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   await client.prompt(text, opts.requestId);
 
   const events = await collectPromise;
+  endThinkingBlock();
   endTextBlock();
+  notifyIndicator(false);
 
   if (deferredText.trim()) {
     setFollowUpText(deferredText);
