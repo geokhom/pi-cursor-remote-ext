@@ -2,6 +2,9 @@
  * Register shadow tools (display names without contour__) that return stashed
  * bridge results. Agent loop then paints ToolExecutionComponent with
  * success/error backgrounds — same UX as local bash/read.
+ *
+ * render() MUST truncate to the given width — pi crashes on overflow:
+ * "Rendered line N exceeds terminal width".
  */
 
 import { displayToolNames, displayToolName } from "./tool-display.js";
@@ -15,15 +18,63 @@ const ANY_OBJECT = {
   additionalProperties: true,
 };
 
+/** CSI / OSC / simple ANSI — stripped for visible width only. */
+const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
+
 /**
- * Minimal pi-tui Component (avoid hard dep on @earendil-works/pi-tui).
- * @param {string[]} lines
+ * Visible column width (ANSI ignored; code points ≈ 1 column — enough for shell).
+ * @param {string} text
  */
-function linesComponent(lines) {
-  const out = lines.length ? lines : [""];
+export function visibleWidth(text) {
+  if (!text) return 0;
+  return [...String(text).replace(ANSI_RE, "")].length;
+}
+
+/**
+ * Truncate to max visible columns, preserving leading ANSI where possible.
+ * @param {string} text
+ * @param {number} maxWidth
+ * @param {string} [ellipsis]
+ */
+export function truncateToWidth(text, maxWidth, ellipsis = "…") {
+  const s = String(text ?? "");
+  if (!(maxWidth > 0)) return "";
+  if (visibleWidth(s) <= maxWidth) return s;
+  const ellW = visibleWidth(ellipsis);
+  const budget = Math.max(0, maxWidth - ellW);
+  let out = "";
+  let w = 0;
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\u001b") {
+      ANSI_RE.lastIndex = i;
+      const m = ANSI_RE.exec(s);
+      if (m && m.index === i) {
+        out += m[0];
+        i += m[0].length;
+        continue;
+      }
+    }
+    const cp = String.fromCodePoint(s.codePointAt(i));
+    if (w + 1 > budget) break;
+    out += cp;
+    w += 1;
+    i += cp.length;
+  }
+  return out + ellipsis;
+}
+
+/**
+ * Minimal pi-tui Component — truncates every line to render(width).
+ * @param {string[] | (() => string[])} linesOrFn
+ */
+function linesComponent(linesOrFn) {
   return {
-    render() {
-      return out;
+    render(width) {
+      const w = typeof width === "number" && width > 0 ? width : 80;
+      const raw = typeof linesOrFn === "function" ? linesOrFn() : linesOrFn;
+      const lines = raw && raw.length ? raw : [""];
+      return lines.map((line) => truncateToWidth(line, w));
     },
     invalidate() {},
   };
@@ -65,7 +116,10 @@ function makeShadowTool(displayName) {
         .join("\n");
       if (!text) return linesComponent([]);
       const color = result?.isError ? "error" : "toolOutput";
-      return linesComponent(text.split("\n").map((l) => theme.fg(color, l)));
+      const lines = text.split("\n").map((l) => theme.fg(color, l));
+      // Cap rows so a huge tool dump cannot flood the TUI.
+      const capped = lines.length > 80 ? [...lines.slice(0, 80), theme.fg("muted", "…")] : lines;
+      return linesComponent(capped);
     },
     async execute(toolCallId, _params, _signal, _onUpdate, _ctx) {
       const stashed = takeToolResult(toolCallId, displayName);

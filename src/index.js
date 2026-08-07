@@ -133,6 +133,14 @@ function streamSimple(model, context, options) {
       }
 
       const conn = resolveBridgeConnection();
+      if (!conn.baseUrl && !conn.unixPath) {
+        throw new Error(
+          "Bridge not configured: create ~/.pi/agent/cursor-remote.json " +
+            "(copy pack/contour-bridge/cursor-remote.example.json), set bridgeToken, " +
+            "then start local-bridge (./pack/contour-bridge/run_bridge.sh). " +
+            "Or set BRIDGE_URL + BRIDGE_LOCAL_TOKEN / BRIDGE_UNIX_PATH."
+        );
+      }
       const client = new BridgeClient({
         baseUrl: conn.baseUrl,
         token: conn.token,
