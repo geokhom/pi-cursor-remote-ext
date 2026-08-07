@@ -5,7 +5,7 @@
  */
 
 import { displayToolNames, displayToolName } from "./tool-display.js";
-import { takeToolResult } from "./result-stash.js";
+import { takeToolResult, hasFollowUpText } from "./result-stash.js";
 import { formatToolArgs, formatToolResult } from "./bridge-client.js";
 
 /** Loose JSON Schema — accepted by pi's typebox/json validator path. */
@@ -68,7 +68,11 @@ function makeShadowTool(displayName) {
       return linesComponent(text.split("\n").map((l) => theme.fg(color, l)));
     },
     async execute(toolCallId, _params, _signal, _onUpdate, _ctx) {
-      const stashed = takeToolResult(toolCallId);
+      const stashed = takeToolResult(toolCallId, displayName);
+      // If final assistant text was deferred, let the agent start another stream
+      // turn so the answer appears BELOW the tool panels (pi paints text above
+      // tools within a single assistant message).
+      const terminate = !hasFollowUpText();
       if (!stashed) {
         return {
           content: [
@@ -81,8 +85,7 @@ function makeShadowTool(displayName) {
           ],
           details: {},
           isError: true,
-          // Stop the agent from starting another LLM turn after our synthetic tools.
-          terminate: true,
+          terminate,
         };
       }
       const body = contentToText(stashed.content);
@@ -90,7 +93,7 @@ function makeShadowTool(displayName) {
         content: [{ type: "text", text: body || (stashed.ok ? "(ok)" : "(failed)") }],
         details: { wireName: stashed.name, ok: stashed.ok },
         isError: stashed.ok === false,
-        terminate: true,
+        terminate,
       };
     },
   };

@@ -390,9 +390,15 @@ export function emptyUsage() {
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
   const { displayToolName } = await import("./tool-display.js");
-  const { stashToolResult, clearToolResults } = await import("./result-stash.js");
+  const {
+    stashToolResult,
+    clearToolResults,
+    trackCallId,
+    setFollowUpText,
+  } = await import("./result-stash.js");
 
   clearToolResults();
+  setFollowUpText("");
 
   const pushed = [];
   const stream = {
@@ -430,12 +436,16 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   let textIndex = null;
   let textBuf = "";
   let sawToolCall = false;
+  /** Text after first tool → follow-up assistant message (below tool panels). */
+  let deferredText = "";
 
   const bumpUsage = () => {
-    const n = output.content.reduce((acc, c) => {
-      if (c.type === "text") return acc + (c.text?.length || 0);
-      return acc;
-    }, 0);
+    const n =
+      deferredText.length +
+      output.content.reduce((acc, c) => {
+        if (c.type === "text") return acc + (c.text?.length || 0);
+        return acc;
+      }, 0);
     output.usage.output = Math.max(1, Math.ceil(n / 4));
     output.usage.totalTokens = output.usage.input + output.usage.output;
   };
@@ -443,6 +453,13 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   /** @param {string} chunk */
   const appendText = (chunk) => {
     if (!chunk) return;
+    // After tools started: hold final answer for a second stream turn so pi
+    // renders it under the colored tool panels (same-message text always sits above).
+    if (sawToolCall) {
+      deferredText += chunk;
+      bumpUsage();
+      return;
+    }
     if (textIndex == null) {
       textIndex = output.content.length;
       textBuf = "";
@@ -481,7 +498,10 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const emitToolCall = (wireName, callId, args) => {
     endTextBlock();
     const name = displayToolName(wireName);
-    const id = callId || `call-${output.content.length}`;
+    const id =
+      (typeof callId === "string" && callId) ||
+      `call-${Date.now().toString(36)}-${output.content.length}`;
+    trackCallId(name, id);
     const contentIndex = output.content.length;
     const toolCall = {
       type: "toolCall",
@@ -507,7 +527,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     if (ev.type === "assistant_delta" && typeof ev.text === "string") {
       appendText(ev.text);
     } else if (ev.type === "assistant_message" && typeof ev.text === "string") {
-      if (!textBuf) {
+      if (sawToolCall) {
+        if (!deferredText.includes(ev.text)) {
+          appendText((deferredText.endsWith("\n") ? "" : "\n") + ev.text);
+        }
+      } else if (!textBuf) {
         appendText(ev.text);
       } else if (!textBuf.includes(ev.text)) {
         appendText((textBuf.endsWith("\n") ? "" : "\n") + ev.text);
@@ -520,10 +544,17 @@ export async function runPromptViaBridge(client, text, opts = {}) {
       emitToolCall(wireName, callId, /** @type {Record<string, unknown>} */ (args));
     } else if (ev.type === "tool_executed") {
       const callId = typeof ev.call_id === "string" ? ev.call_id : "";
-      stashToolResult(callId, {
+      const wireName = typeof ev.name === "string" ? ev.name : "";
+      const display = displayToolName(wireName || "tool");
+      let id = callId;
+      if (!id) {
+        id = `exec-${Date.now().toString(36)}-${stashSizeApprox()}`;
+        trackCallId(display, id);
+      }
+      stashToolResult(id, {
         ok: ev.ok !== false,
         content: ev.content,
-        name: typeof ev.name === "string" ? ev.name : undefined,
+        name: wireName || undefined,
       });
     } else if (ev.type === "run_finished") {
       output.stopReason = sawToolCall ? "toolUse" : "stop";
@@ -549,6 +580,10 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     }
   };
 
+  function stashSizeApprox() {
+    return output.content.filter((c) => c.type === "toolCall").length;
+  }
+
   // Start SSE before prompt so we do not miss early events.
   // Default 10m — Cursor runs with tools exceed the old 15s smoke timeout.
   const collectPromise = client.collectUntilTerminal(
@@ -562,14 +597,20 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const events = await collectPromise;
   endTextBlock();
 
+  if (deferredText.trim()) {
+    setFollowUpText(deferredText);
+  }
+
   if (output.stopReason === "pending") {
     output.stopReason = "error";
     output.errorMessage = "stream ended without terminal";
   }
   if (output.stopReason === "error" || output.stopReason === "aborted") {
+    setFollowUpText(""); // cancel follow-up on error
     stream.push({ type: "error", reason: output.stopReason, error: output });
   } else {
-    // toolUse → agent runs shadow tools (stashed results) then stops (terminate:true).
+    // toolUse → agent runs shadow tools (stashed results); if follow-up text
+    // exists, terminate:false continues into a second text-only stream turn.
     const reason =
       output.stopReason === "toolUse" || sawToolCall ? "toolUse" : "stop";
     output.stopReason = reason;

@@ -91,6 +91,44 @@ function streamSimple(model, context, options) {
         const merged = [...new Set([...cur.filter((n) => !shadow.includes(n)), ...shadow])];
         _piRef.setActiveTools(merged);
       }
+
+      const { takeFollowUpText } = await import("./result-stash.js");
+      const followUp = takeFollowUpText();
+      if (followUp != null) {
+        // Second turn after shadow tools: final answer below tool panels.
+        const output = {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+          api: model?.api || "cursor-remote-bridge",
+          provider: model?.provider || "cursor-remote",
+          model: model?.id || "cursor-remote",
+          usage: emptyUsage(),
+          stopReason: "pending",
+          timestamp: Date.now(),
+        };
+        stream.push({ type: "start", partial: output });
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        output.content[0].text = followUp;
+        output.usage.output = Math.max(1, Math.ceil(followUp.length / 4));
+        output.usage.totalTokens = output.usage.output;
+        stream.push({
+          type: "text_delta",
+          contentIndex: 0,
+          delta: followUp,
+          partial: output,
+        });
+        stream.push({
+          type: "text_end",
+          contentIndex: 0,
+          content: followUp,
+          partial: output,
+        });
+        output.stopReason = "stop";
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+        return;
+      }
+
       const conn = resolveBridgeConnection();
       const client = new BridgeClient({
         baseUrl: conn.baseUrl,
