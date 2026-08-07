@@ -100,6 +100,19 @@ function makeShadowTool(displayName) {
 }
 
 /**
+ * @param {unknown} model
+ * @returns {boolean}
+ */
+function isCursorRemoteModel(model) {
+  const m = /** @type {{ provider?: string, api?: string, id?: string } | null} */ (model);
+  return (
+    m?.provider === "cursor-remote" ||
+    m?.api === "cursor-remote-bridge" ||
+    m?.id === "cursor-remote"
+  );
+}
+
+/**
  * @param {import('./types.js').ExtensionAPI} pi
  */
 export function registerShadowTools(pi) {
@@ -110,17 +123,19 @@ export function registerShadowTools(pi) {
 
   const shadow = new Set(displayToolNames());
 
+  /**
+   * Agent-loop snapshots `context.tools` at turn start. Mid-stream
+   * setActiveTools (inside streamSimple) is too late — execute sees the old
+   * list and returns "Tool shell not found". Activate before the snapshot.
+   * @param {unknown} model
+   */
   const syncActive = (model) => {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
       return;
     }
-    const ours =
-      model?.provider === "cursor-remote" ||
-      model?.api === "cursor-remote-bridge" ||
-      model?.id === "cursor-remote";
     const current = pi.getActiveTools() || [];
     const without = current.filter((n) => !shadow.has(n));
-    if (ours) {
+    if (isCursorRemoteModel(model)) {
       pi.setActiveTools([...without, ...shadow]);
     } else {
       pi.setActiveTools(without);
@@ -131,9 +146,13 @@ export function registerShadowTools(pi) {
     pi.on("model_select", (ev) => {
       syncActive(ev?.model);
     });
-    pi.on("session_start", () => {
-      // Keep shadow tools out until cursor-remote is selected.
-      syncActive(null);
+    pi.on("session_start", (_ev, ctx) => {
+      // Use current model — do NOT clear with null (that dropped shell/read_file
+      // from the active set and caused "Tool shell not found" on first prompt).
+      syncActive(ctx?.model);
+    });
+    pi.on("before_agent_start", (_ev, ctx) => {
+      syncActive(ctx?.model);
     });
   }
 }

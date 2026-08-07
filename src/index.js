@@ -84,6 +84,9 @@ function streamSimple(model, context, options) {
   const stream = createLocalStream();
   (async () => {
     try {
+      // Belt-and-suspenders: primary activation is before_agent_start / session_start
+      // (agent-loop snapshots tools at turn start — mid-stream setActiveTools is too late
+      // for THIS turn's execute, but helps the next turn / follow-ups).
       if (_piRef && typeof _piRef.setActiveTools === "function") {
         const { displayToolNames } = await import("./tool-display.js");
         const shadow = displayToolNames();
