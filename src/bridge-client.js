@@ -193,6 +193,36 @@ export class BridgeClient {
   }
 
   /**
+   * GET /mcp/tools — MCP tools currently advertised in hello.
+   */
+  async getMcpTools() {
+    const res = await this._request("GET", "/mcp/tools", null, {});
+    if (res.statusCode !== 200) {
+      throw new Error(`mcp tools GET HTTP ${res.statusCode}: ${res.body}`);
+    }
+    return JSON.parse(res.body || "{}");
+  }
+
+  /**
+   * POST /mcp/refresh — reconnect MCP + reopen VPS session.
+   * @param {Record<string, unknown>} [body]
+   */
+  async refreshMcp(body = {}) {
+    const payload = JSON.stringify(body || {});
+    const res = await this._request("POST", "/mcp/refresh", payload, {
+      "Content-Type": "application/json",
+    });
+    if (res.statusCode !== 200) {
+      throw new Error(`mcp refresh HTTP ${res.statusCode}: ${res.body}`);
+    }
+    const json = JSON.parse(res.body || "{}");
+    if (!json.ok) {
+      throw new Error(`mcp refresh rejected: ${json.error || "unknown"}`);
+    }
+    return json;
+  }
+
+  /**
    * GET /permissions — current session grants on the bridge.
    * @returns {Promise<{ok: boolean, grants: string[]}>}
    */

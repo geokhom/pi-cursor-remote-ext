@@ -45,6 +45,7 @@ import {
   resolveModelOrFallback,
 } from "./model-discovery.js";
 import { installGenerationSpeedFooter } from "./generation-speed.js";
+import { installMcpAutoRefresh } from "./mcp-auto-refresh.js";
 
 function lastUserText(context) {
   const messages = context?.messages || [];
@@ -324,15 +325,44 @@ export default async function register(pi) {
     models = await fetchProviderModels(client);
   }
 
+  /** @type {{ syncMcpShadows?: Function } | null} */
+  const shadowApi = registerShadowTools(pi);
+
+  /** @type {unknown} */
+  let lastModel = null;
+  /** @type {{ notify?: Function } | null} */
+  let lastUi = null;
+
+  installMcpAutoRefresh({
+    pi,
+    client,
+    shadowApi,
+    getModel: () => lastModel,
+    notify: (msg, level) => {
+      try {
+        lastUi?.notify?.(msg, level || "info");
+      } catch {
+        // ignore
+      }
+    },
+  });
+
   if (typeof pi.on === "function") {
     pi.on("session_start", async (event, ctx) => {
       captureUi(event, ctx);
+      lastModel = ctx?.model || event?.model || lastModel;
+      if (ctx?.ui) lastUi = ctx.ui;
       installGenerationSpeedFooter(ctx);
       if (!client) return;
       try {
         await handshakeWorkspaceCwd(client, ctx, ctx);
       } catch {
         // notify already emitted; keep going so models refresh can still run
+      }
+      try {
+        await shadowApi?.syncMcpShadows?.(client, ctx?.model);
+      } catch {
+        // MCP optional
       }
       try {
         const next = await fetchProviderModels(client);
@@ -351,9 +381,13 @@ export default async function register(pi) {
     });
     pi.on("before_agent_start", (event, ctx) => {
       captureUi(event, ctx);
+      lastModel = ctx?.model || lastModel;
+      if (ctx?.ui) lastUi = ctx.ui;
     });
     pi.on("model_select", (_event, ctx) => {
       captureUi(_event, ctx);
+      lastModel = ctx?.model || lastModel;
+      if (ctx?.ui) lastUi = ctx.ui;
     });
   }
 
@@ -384,9 +418,32 @@ export default async function register(pi) {
         }
       },
     });
+    pi.registerCommand("cursor-remote-refresh-mcp", {
+      description: "Refresh MCP tools on local-bridge (reopens VPS session)",
+      handler: async (_args, ctx) => {
+        if (!client) {
+          ctx?.ui?.notify?.("Bridge not configured; cannot refresh MCP.", "warning");
+          return;
+        }
+        try {
+          const snap = await client.refreshMcp({});
+          await shadowApi?.syncMcpShadows?.(client, ctx?.model);
+          const n = Array.isArray(snap?.tools) ? snap.tools.length : 0;
+          const trunc = snap?.truncated ? ` (truncated ${snap.truncated})` : "";
+          ctx?.ui?.notify?.(
+            `MCP tools refreshed (${n} tool${n === 1 ? "" : "s"})${trunc}.`,
+            "info"
+          );
+        } catch (err) {
+          ctx?.ui?.notify?.(
+            `MCP refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      },
+    });
   }
 
-  registerShadowTools(pi);
   registerCursorRemoteProvider(pi, models);
 }
 

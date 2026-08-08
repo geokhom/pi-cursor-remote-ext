@@ -7,7 +7,7 @@
  * "Rendered line N exceeds terminal width".
  */
 
-import { displayToolNames, displayToolName } from "./tool-display.js";
+import { displayToolNames, displayToolName, setMcpWireTools } from "./tool-display.js";
 import { takeToolResult, hasFollowUpText } from "./result-stash.js";
 import { formatToolArgs, formatToolResult, hasActiveLiveRun } from "./bridge-client.js";
 import { MODEL_VALUE_SET } from "./config.js";
@@ -24,6 +24,10 @@ const TOOL_PREVIEW_LINES = 5;
 
 /** CSI / OSC / simple ANSI — stripped for visible width only. */
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
+
+/** @type {Set<string>} */
+const _registeredShadows = new Set();
+
 
 /**
  * Visible column width (ANSI ignored; code points ≈ 1 column — enough for shell).
@@ -206,12 +210,22 @@ function isCursorRemoteModel(model) {
  * @param {import('./types.js').ExtensionAPI} pi
  */
 export function registerShadowTools(pi) {
-  if (!pi || typeof pi.registerTool !== "function") return;
-  for (const name of displayToolNames()) {
-    pi.registerTool(makeShadowTool(name));
+  if (!pi || typeof pi.registerTool !== "function") {
+    return { syncActive: () => {}, syncMcpShadows: async () => {}, ensureShadow: () => {} };
   }
 
-  const shadow = new Set(displayToolNames());
+  /**
+   * @param {string} name
+   */
+  const ensureShadow = (name) => {
+    if (_registeredShadows.has(name)) return;
+    pi.registerTool(makeShadowTool(name));
+    _registeredShadows.add(name);
+  };
+
+  for (const name of displayToolNames()) {
+    ensureShadow(name);
+  }
 
   /**
    * Agent-loop snapshots `context.tools` at turn start. Mid-stream
@@ -223,12 +237,34 @@ export function registerShadowTools(pi) {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
       return;
     }
+    const shadow = new Set(displayToolNames());
+    for (const name of shadow) ensureShadow(name);
     const current = pi.getActiveTools() || [];
-    const without = current.filter((n) => !shadow.has(n));
+    const without = current.filter((n) => !shadow.has(n) && !_registeredShadows.has(n));
     if (isCursorRemoteModel(model)) {
       pi.setActiveTools([...without, ...shadow]);
     } else {
       pi.setActiveTools(without);
+    }
+  };
+
+  /**
+   * Pull MCP tools from bridge and register shadows (call after session handshake).
+   * @param {import('./bridge-client.js').BridgeClient | null | undefined} client
+   * @param {unknown} [model]
+   */
+  const syncMcpShadows = async (client, model) => {
+    if (!client || typeof client.getMcpTools !== "function") return;
+    try {
+      const snap = await client.getMcpTools();
+      const wires = (snap?.tools || [])
+        .map((t) => (t && typeof t.name === "string" ? t.name : null))
+        .filter(Boolean);
+      setMcpWireTools(wires);
+      for (const name of displayToolNames()) ensureShadow(name);
+      syncActive(model);
+    } catch {
+      // MCP optional; keep core shadows
     }
   };
 
@@ -245,6 +281,8 @@ export function registerShadowTools(pi) {
       syncActive(ctx?.model);
     });
   }
+
+  return { syncActive, syncMcpShadows, ensureShadow };
 }
 
-export { displayToolName };
+export { displayToolName, setMcpWireTools };

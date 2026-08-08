@@ -17,6 +17,10 @@ export const CONTOUR_WIRE_TOOLS = Object.freeze([
   "contour__shell",
 ]);
 
+/** Extra MCP wire names from bridge GET /mcp/tools (session-scoped). */
+/** @type {string[]} */
+let _mcpWireTools = [];
+
 /**
  * @param {string} wireName
  * @returns {string}
@@ -41,5 +45,32 @@ export function wireToolName(displayName) {
 
 /** @returns {string[]} */
 export function displayToolNames() {
-  return CONTOUR_WIRE_TOOLS.map(displayToolName);
+  const core = CONTOUR_WIRE_TOOLS.map(displayToolName);
+  const mcp = _mcpWireTools.map(displayToolName);
+  return [...new Set([...core, ...mcp])];
+}
+
+/**
+ * Replace MCP wire-name list used for shadow registration / active tools.
+ * @param {Iterable<string> | null | undefined} wireNames
+ */
+export function setMcpWireTools(wireNames) {
+  const next = [];
+  if (wireNames) {
+    for (const n of wireNames) {
+      if (
+        typeof n === "string" &&
+        n.startsWith(CONTOUR_PREFIX) &&
+        n.includes("mcp__")
+      ) {
+        next.push(n);
+      }
+    }
+  }
+  _mcpWireTools = next;
+}
+
+/** @returns {string[]} */
+export function mcpWireTools() {
+  return [..._mcpWireTools];
 }
