@@ -47,14 +47,14 @@ export function mcpStatusHasTools(snapshot) {
     servers?: Array<{ status?: string, toolCount?: number, disabled?: boolean }>
   }} */ (snapshot);
   if (Array.isArray(s.servers)) {
+    // Only live "connected" — cached/keep-alive alone must not reopen sid
+    // (stdio servers like chrome-devtools often sit in cached and flap).
     return s.servers.some(
       (srv) =>
         srv &&
         !srv.disabled &&
         (Number(srv.toolCount) || 0) > 0 &&
-        (srv.status === "connected" ||
-          srv.status === "cached" ||
-          srv.status === "keep-alive")
+        srv.status === "connected"
     );
   }
   return (Number(s.totalTools) || 0) > 0 && (Number(s.connectedCount) || 0) > 0;
@@ -125,6 +125,11 @@ export function installMcpAutoRefresh(opts) {
         .filter(Boolean)
         .sort()
         .join(",");
+      // Session already has MCP tools from hello — skip reopen unless forced.
+      if (reason !== "manual" && beforeNames) {
+        lastSuccessFp = lastStatusFp;
+        return;
+      }
 
       await client.refreshMcp({});
       await shadowApi?.syncMcpShadows?.(client, getModel?.());
