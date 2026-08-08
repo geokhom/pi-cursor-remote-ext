@@ -459,7 +459,12 @@ export {
   handshakeWorkspaceCwd,
   resolveWorkspaceCwd,
 };
-export { formatToolArgs, formatToolResult, joinThinkingChunk } from "./bridge-client.js";
+export {
+  formatToolArgs,
+  formatToolResult,
+  joinThinkingChunk,
+  assertUnixSocketSafe,
+} from "./bridge-client.js";
 export { displayToolName } from "./tool-display.js";
 export {
   loadConfig,

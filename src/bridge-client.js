@@ -10,6 +10,7 @@
 
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import fs from "node:fs";
 import { displayToolName } from "./tool-display.js";
 import {
   stashToolResult,
@@ -69,6 +70,44 @@ export function joinThinkingChunk(buf, chunk) {
  * @property {string} [token] Bearer token (required for TCP mode)
  * @property {string} [unixPath] Absolute path to Unix socket (0600)
  */
+
+/**
+ * Fail-closed checks before connecting to a local-bridge Unix socket (STATUS P1d).
+ * Owner must match process uid; mode must be exactly 0600; no symlinks.
+ * @param {string} unixPath
+ */
+export function assertUnixSocketSafe(unixPath) {
+  if (typeof unixPath !== "string" || !unixPath) {
+    throw new Error("unixPath required");
+  }
+  let st;
+  try {
+    st = fs.lstatSync(unixPath);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`unix socket missing: ${unixPath} (${msg})`);
+  }
+  if (typeof st.isSymbolicLink === "function" && st.isSymbolicLink()) {
+    throw new Error("unix socket must not be a symlink");
+  }
+  if (typeof st.isSocket === "function" && !st.isSocket()) {
+    throw new Error(`path is not a unix socket: ${unixPath}`);
+  }
+  if (typeof process.getuid === "function") {
+    const uid = process.getuid();
+    if (typeof st.uid === "number" && st.uid !== uid) {
+      throw new Error(
+        `unix socket owner mismatch: uid=${st.uid} expected=${uid}`
+      );
+    }
+  }
+  const mode = st.mode & 0o777;
+  if (mode !== 0o600) {
+    throw new Error(
+      `unix socket mode must be 0600, got ${mode.toString(8).padStart(3, "0")}`
+    );
+  }
+}
 
 /**
  * Parse BRIDGE_GRANTS / BRIDGE_GRANT_WRITE / BRIDGE_GRANT_SHELL into known tiers.
@@ -352,6 +391,7 @@ export class BridgeClient {
       /** @type {typeof httpRequest} */
       let reqFn;
       if (this.unixPath) {
+        assertUnixSocketSafe(this.unixPath);
         opts.socketPath = this.unixPath;
         opts.host = "localhost";
         reqFn = httpRequest;
@@ -387,6 +427,7 @@ export class BridgeClient {
       };
       let reqFn;
       if (this.unixPath) {
+        assertUnixSocketSafe(this.unixPath);
         opts.socketPath = this.unixPath;
         opts.host = "localhost";
         reqFn = httpRequest;
