@@ -136,6 +136,37 @@ export class BridgeClient {
   }
 
   /**
+   * POST /session — set workspace cwd (handshake before open/hello when bridge
+   * was started without --cwd).
+   * @param {{ cwd: string }} body
+   */
+  async setSession(body) {
+    const payload = JSON.stringify(body || {});
+    const res = await this._request("POST", "/session", payload, {
+      "Content-Type": "application/json",
+    });
+    if (res.statusCode !== 200) {
+      throw new Error(`session POST HTTP ${res.statusCode}: ${res.body}`);
+    }
+    const json = JSON.parse(res.body || "{}");
+    if (!json.ok) {
+      throw new Error(`session set rejected: ${json.error || "unknown"}`);
+    }
+    return json;
+  }
+
+  /**
+   * GET /session — current cwd + ready flag.
+   */
+  async getSession() {
+    const res = await this._request("GET", "/session", null, {});
+    if (res.statusCode !== 200) {
+      throw new Error(`session GET HTTP ${res.statusCode}: ${res.body}`);
+    }
+    return JSON.parse(res.body || "{}");
+  }
+
+  /**
    * GET /models — cached VPS catalog snapshot.
    */
   async getModels() {
@@ -372,6 +403,41 @@ export class BridgeClient {
       }
       req.end();
     });
+  }
+}
+
+/**
+ * Resolve pi workspace cwd for bridge handshake.
+ * @param {{ sessionManager?: { getCwd?: () => string } } | null | undefined} ctx
+ * @returns {string}
+ */
+export function resolveWorkspaceCwd(ctx) {
+  const fromSm =
+    typeof ctx?.sessionManager?.getCwd === "function"
+      ? ctx.sessionManager.getCwd()
+      : null;
+  if (typeof fromSm === "string" && fromSm.trim()) {
+    return fromSm.trim();
+  }
+  return process.cwd();
+}
+
+/**
+ * POST workspace cwd to local-bridge (open/hello metadata + tool root).
+ * @param {BridgeClient} client
+ * @param {{ sessionManager?: { getCwd?: () => string } } | null | undefined} ctx
+ * @param {{ ui?: { notify?: (msg: string, level?: string) => void } } | null | undefined} [uiCtx]
+ */
+export async function handshakeWorkspaceCwd(client, ctx, uiCtx) {
+  const cwd = resolveWorkspaceCwd(ctx);
+  try {
+    return await client.setSession({ cwd });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (typeof uiCtx?.ui?.notify === "function") {
+      uiCtx.ui.notify(`Workspace cwd handshake failed: ${msg}`, "warning");
+    }
+    throw err;
   }
 }
 

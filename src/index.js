@@ -25,6 +25,8 @@ import {
   hasActiveLiveRun,
   grantsFromEnv,
   emptyUsage,
+  handshakeWorkspaceCwd,
+  resolveWorkspaceCwd,
 } from "./bridge-client.js";
 import {
   resolveBridgeConnection,
@@ -328,6 +330,11 @@ export default async function register(pi) {
       installGenerationSpeedFooter(ctx);
       if (!client) return;
       try {
+        await handshakeWorkspaceCwd(client, ctx, ctx);
+      } catch {
+        // notify already emitted; keep going so models refresh can still run
+      }
+      try {
         const next = await fetchProviderModels(client);
         registerCursorRemoteProvider(pi, next);
         const cur = ctx?.model?.id || event?.model?.id;
@@ -392,6 +399,8 @@ export {
   streamSimple,
   grantsFromEnv,
   emptyUsage,
+  handshakeWorkspaceCwd,
+  resolveWorkspaceCwd,
 };
 export { formatToolArgs, formatToolResult, joinThinkingChunk } from "./bridge-client.js";
 export { displayToolName } from "./tool-display.js";
