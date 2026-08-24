@@ -36,28 +36,70 @@ export function mcpStatusFingerprint(snapshot) {
 
 /**
  * True when snapshot shows at least one server with tools in a usable state.
+ * Includes adapter "cached" keep-alive (stdio like chrome-devtools) so a gap
+ * vs the contour hello catalog can still trigger one refresh.
  * @param {unknown} snapshot
  * @returns {boolean}
  */
 export function mcpStatusHasTools(snapshot) {
-  if (!snapshot || typeof snapshot !== "object") return false;
+  return mcpAdapterServersWithTools(snapshot).length > 0;
+}
+
+/**
+ * Adapter server names that expose tools (connected or cached keep-alive).
+ * @param {unknown} snapshot
+ * @returns {string[]}
+ */
+export function mcpAdapterServersWithTools(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return [];
   const s = /** @type {{
     totalTools?: unknown,
     connectedCount?: unknown,
-    servers?: Array<{ status?: string, toolCount?: number, disabled?: boolean }>
+    servers?: Array<{ name?: string, status?: string, toolCount?: number, disabled?: boolean }>
   }} */ (snapshot);
-  if (Array.isArray(s.servers)) {
-    // Only live "connected" — cached/keep-alive alone must not reopen sid
-    // (stdio servers like chrome-devtools often sit in cached and flap).
-    return s.servers.some(
-      (srv) =>
-        srv &&
-        !srv.disabled &&
-        (Number(srv.toolCount) || 0) > 0 &&
-        srv.status === "connected"
+  if (!Array.isArray(s.servers)) {
+    if ((Number(s.totalTools) || 0) > 0 && (Number(s.connectedCount) || 0) > 0) {
+      return ["*"];
+    }
+    return [];
+  }
+  const names = [];
+  for (const srv of s.servers) {
+    if (!srv || srv.disabled) continue;
+    if ((Number(srv.toolCount) || 0) <= 0) continue;
+    const st = String(srv.status || "");
+    if (st !== "connected" && st !== "cached") continue;
+    const name = String(srv.name || "").trim();
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * True when the adapter has a named server with tools that is missing from
+ * the bridge GET /mcp/tools snapshot (contour hello).
+ * @param {unknown} adapterSnap
+ * @param {unknown} bridgeSnap
+ * @returns {boolean}
+ */
+export function mcpCatalogHasGap(adapterSnap, bridgeSnap) {
+  const want = mcpAdapterServersWithTools(adapterSnap);
+  if (!want.length || want.includes("*")) {
+    return want.includes("*") && !(
+      Array.isArray(/** @type {{ tools?: unknown }} */ (bridgeSnap)?.tools) &&
+      /** @type {{ tools: unknown[] }} */ (bridgeSnap).tools.length > 0
     );
   }
-  return (Number(s.totalTools) || 0) > 0 && (Number(s.connectedCount) || 0) > 0;
+  const have = new Set();
+  const tools = /** @type {{ tools?: Array<{ server?: string }> }} */ (bridgeSnap)?.tools;
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      if (t && typeof t.server === "string" && t.server.trim()) {
+        have.add(t.server.trim());
+      }
+    }
+  }
+  return want.some((name) => !have.has(name));
 }
 
 /**
@@ -96,6 +138,8 @@ export function installMcpAutoRefresh(opts) {
   let lastStatusFp = "";
   /** Status fingerprint after last successful refresh. */
   let lastSuccessFp = "";
+  /** @type {unknown} */
+  let lastAdapterSnap = null;
 
   /**
    * @param {string} reason
@@ -128,8 +172,16 @@ export function installMcpAutoRefresh(opts) {
         .filter(Boolean)
         .sort()
         .join(",");
-      // Session already has MCP tools from hello — skip reopen unless forced.
-      if (reason !== "manual" && beforeNames) {
+      const gap = mcpCatalogHasGap(lastAdapterSnap, before);
+      if (Array.isArray(before.errors) && before.errors.length && (gap || reason === "manual")) {
+        const detail = before.errors
+          .map((e) => `${e?.server || "?"}: ${e?.error || "failed"}`)
+          .join("; ");
+        notify?.(`MCP catalog errors: ${detail}`, "warning");
+      }
+      // Skip reopen when hello already has MCP tools *and* adapter servers are covered.
+      // Cached chrome-devtools must still refresh if it is missing from contour hello.
+      if (reason !== "manual" && beforeNames && !gap) {
         lastSuccessFp = lastStatusFp;
         return;
       }
@@ -178,6 +230,7 @@ export function installMcpAutoRefresh(opts) {
    */
   function schedule(reason, snapshot, force = false) {
     if (snapshot != null) {
+      lastAdapterSnap = snapshot;
       if (!mcpStatusHasTools(snapshot)) return;
       const fp = mcpStatusFingerprint(snapshot);
       if (!force && fp && fp === lastStatusFp) return;

@@ -1,6 +1,6 @@
 {
   "name": "pi-cursor-remote",
-  "version": "0.1.45",
+  "version": "0.1.47",
   "private": true,
   "type": "module",
   "description": "Level A thin pi extension: local-bridge client (Cursor tools stay on bridge)",

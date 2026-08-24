@@ -263,8 +263,10 @@ export function registerShadowTools(pi) {
       setMcpWireTools(wires);
       for (const name of displayToolNames()) ensureShadow(name);
       syncActive(model);
+      return snap;
     } catch {
       // MCP optional; keep core shadows
+      return null;
     }
   };
 

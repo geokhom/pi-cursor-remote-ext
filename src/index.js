@@ -441,7 +441,14 @@ export default async function register(pi) {
         // notify already emitted from handshake
       }
       try {
-        await shadowApi?.syncMcpShadows?.(client, ctx?.model);
+        const mcpSnap = await shadowApi?.syncMcpShadows?.(client, ctx?.model);
+        const errs = mcpSnap?.errors;
+        if (Array.isArray(errs) && errs.length) {
+          const detail = errs
+            .map((e) => `${e?.server || "?"}: ${e?.error || "failed"}`)
+            .join("; ");
+          ctx?.ui?.notify?.(`MCP catalog errors: ${detail}`, "warning");
+        }
       } catch {
         // MCP optional
       }
@@ -536,9 +543,11 @@ export default async function register(pi) {
           await shadowApi?.syncMcpShadows?.(client, ctx?.model);
           const n = Array.isArray(snap?.tools) ? snap.tools.length : 0;
           const trunc = snap?.truncated ? ` (truncated ${snap.truncated})` : "";
+          const errn = Array.isArray(snap?.errors) ? snap.errors.length : 0;
+          const extra = errn ? `; ${errn} catalog error${errn === 1 ? "" : "s"}` : "";
           ctx?.ui?.notify?.(
-            `MCP tools refreshed (${n} tool${n === 1 ? "" : "s"})${trunc}.`,
-            "info"
+            `MCP tools refreshed (${n} tool${n === 1 ? "" : "s"})${trunc}${extra}.`,
+            errn ? "warning" : "info"
           );
         } catch (err) {
           ctx?.ui?.notify?.(
