@@ -42,6 +42,7 @@ import {
   buildCursorModelSelection,
   fallbackProviderModels,
   cachedProviderModels,
+  bootstrapProviderModels,
   saveModelsCache,
   registerModelItems,
   resolveModelOrFallback,
@@ -176,7 +177,7 @@ async function fetchProviderModels(client, opts = {}) {
       const json = await client.getModels();
       if (json?.ok && Array.isArray(json.models) && json.models.length) {
         last = registerModelItems(json.models);
-        if (json.live) {
+        if (json.live || json.models.length > 3) {
           try {
             saveModelsCache(json.models);
           } catch {
@@ -388,19 +389,9 @@ export default async function register(pi) {
 
   let models;
   try {
-    models = cachedProviderModels() || fallbackProviderModels();
+    models = bootstrapProviderModels();
   } catch {
-    models = [
-      {
-        id: DEFAULT_MODEL,
-        name: "Composer 2.5",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128000,
-        maxTokens: 8192,
-      },
-    ];
+    models = fallbackProviderModels();
   }
 
   // Register immediately so pi TUI has a model + slash commands even if the
@@ -619,6 +610,7 @@ export {
   encodePiModelId,
   parsePiModelId,
   cachedProviderModels,
+  bootstrapProviderModels,
   saveModelsCache,
   loadModelsCache,
   modelsCachePath,

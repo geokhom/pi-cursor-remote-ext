@@ -334,10 +334,26 @@ export function registerModelItems(items) {
   return configs;
 }
 
-export function fallbackProviderModels() {
-  metadataByPiModelId().clear();
-  const items = [
-    { id: DEFAULT_MODEL, display_name: "Composer 2.5", parameters: [], variants: [] },
+/** Live catalog exposes `fast`; Pi persists `composer-2.5:slow`. Stub must too. */
+const FAST_PARAMETER = {
+  id: "fast",
+  values: [{ value: "false" }, { value: "true" }],
+};
+
+function withFastParam(item) {
+  const params = Array.isArray(item?.parameters) ? item.parameters : [];
+  if (params.some((p) => p && p.id === "fast")) return item;
+  return { ...item, parameters: [...params, FAST_PARAMETER] };
+}
+
+function fallbackCatalogItems() {
+  return [
+    withFastParam({
+      id: DEFAULT_MODEL,
+      display_name: "Composer 2.5",
+      parameters: [],
+      variants: [],
+    }),
     { id: "auto", display_name: "Auto", parameters: [], variants: [] },
     {
       id: "auto-smart",
@@ -362,7 +378,28 @@ export function fallbackProviderModels() {
       ],
     },
   ];
-  return registerModelItems(items);
+}
+
+export function fallbackProviderModels() {
+  return registerModelItems(fallbackCatalogItems());
+}
+
+/**
+ * Cache + fallback aliases in one registerModelItems pass (do not call
+ * fallback after cache — that clears metadata). Always includes
+ * composer-2.5:slow so Pi restore does not jump to llama-cpp.
+ */
+export function bootstrapProviderModels() {
+  const byId = new Map();
+  for (const item of loadModelsCache() || []) {
+    if (item?.id) byId.set(item.id, item);
+  }
+  for (const item of fallbackCatalogItems()) {
+    if (!byId.has(item.id)) byId.set(item.id, item);
+  }
+  const composer = byId.get(DEFAULT_MODEL);
+  if (composer) byId.set(DEFAULT_MODEL, withFastParam(composer));
+  return registerModelItems([...byId.values()]);
 }
 
 export function getCursorModelMetadata(modelId) {
