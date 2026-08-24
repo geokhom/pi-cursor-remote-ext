@@ -442,13 +442,40 @@ export function buildCursorModelSelection(modelId, thinkingLevel = "off") {
 }
 
 /**
- * Soft fallback: if current pi model id missing from catalog → composer-2.5.
+ * Soft fallback: if current pi model id missing from catalog → best match by
+ * base id (``grok-4.5:slow`` → ``grok-4.5…``) else composer-2.5.
  * @param {string | undefined} currentId
  * @param {object[]} providerModels
  */
 export function resolveModelOrFallback(currentId, providerModels) {
-  const ids = new Set((providerModels || []).map((m) => m.id));
+  const list = providerModels || [];
+  const ids = new Set(list.map((m) => m.id));
   if (currentId && ids.has(currentId)) return currentId;
+  if (currentId) {
+    const parsed = parsePiModelId(currentId);
+    const base = parsed.baseId || currentId;
+    const hits = list.filter((m) => {
+      if (!m?.id) return false;
+      if (m.id === base) return true;
+      const p = parsePiModelId(m.id);
+      return p.baseId === base;
+    });
+    if (hits.length) {
+      const exact = hits.find((m) => {
+        const p = parsePiModelId(m.id);
+        return (
+          p.fastOverride === parsed.fastOverride &&
+          (p.context || undefined) === (parsed.context || undefined)
+        );
+      });
+      if (exact) return exact.id;
+      const sameFast = hits.find(
+        (m) => parsePiModelId(m.id).fastOverride === parsed.fastOverride
+      );
+      if (sameFast) return sameFast.id;
+      return hits[0].id;
+    }
+  }
   if (ids.has(DEFAULT_MODEL)) return DEFAULT_MODEL;
-  return providerModels[0]?.id || DEFAULT_MODEL;
+  return list[0]?.id || DEFAULT_MODEL;
 }

@@ -47,6 +47,51 @@ import {
 import { installGenerationSpeedFooter } from "./generation-speed.js";
 import { installMcpAutoRefresh } from "./mcp-auto-refresh.js";
 
+/** @type {import('./types.js').ExtensionAPI | null} */
+let _piRef = null;
+/** @type {BridgeClient | null} */
+let _bridgeClient = null;
+/** @type {string} */
+let _baseUrl = "http://127.0.0.1:18765";
+/** @type {unknown} */
+let _lastModel = null;
+
+/**
+ * After bridge restart, pi may still be up without a VPS session — handshake
+ * cwd + wait for live models before the first prompt (avoids cwd_required /
+ * 3-id fallback until manual /reload).
+ * @param {{ sessionManager?: { getCwd?: () => string }, ui?: { notify?: Function }, model?: { id?: string } } | null | undefined} [ctx]
+ */
+async function ensureCursorRemoteSession(ctx) {
+  const client = _bridgeClient;
+  if (!client) return;
+  let ready = false;
+  try {
+    const s = await client.getSession();
+    ready = Boolean(s?.ok && s.ready && s.cwd);
+  } catch {
+    ready = false;
+  }
+  if (!ready) {
+    await handshakeWorkspaceCwd(client, ctx || {}, ctx);
+  }
+  const next = await fetchProviderModels(client, {
+    timeoutMs: ready ? 8000 : 20000,
+    preferLive: true,
+  });
+  if (_piRef) {
+    registerCursorRemoteProvider(_piRef, next);
+  }
+  const cur =
+    ctx?.model?.id ||
+    (typeof _lastModel === "object" && _lastModel && "id" in /** @type {object} */ (_lastModel)
+      ? /** @type {{ id?: string }} */ (_lastModel).id
+      : undefined);
+  if (cur && next.length) {
+    resolveModelOrFallback(cur, next);
+  }
+}
+
 function lastUserText(context) {
   const messages = context?.messages || [];
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -99,11 +144,6 @@ function createLocalStream() {
     },
   };
 }
-
-/** @type {import('./types.js').ExtensionAPI | null} */
-let _piRef = null;
-/** @type {string} */
-let _baseUrl = "http://127.0.0.1:18765";
 
 function createProviderConfig(models) {
   return {
@@ -158,6 +198,18 @@ function streamSimple(model, context, options) {
         const cur = _piRef.getActiveTools?.() || [];
         const merged = [...new Set([...cur.filter((n) => !shadow.includes(n)), ...shadow])];
         _piRef.setActiveTools(merged);
+      }
+
+      _lastModel = model || _lastModel;
+      try {
+        await ensureCursorRemoteSession({
+          sessionManager: context?.sessionManager,
+          ui: context?.ui,
+          model,
+        });
+      } catch (err) {
+        // Surface cwd/open failures instead of opaque later 409s.
+        throw err instanceof Error ? err : new Error(String(err));
       }
 
       // Legacy follow-up (pre multi-turn drain); prefer live-run resume.
@@ -354,12 +406,11 @@ export default async function register(pi) {
           unixPath: conn.unixPath,
         })
       : null;
+  _bridgeClient = client;
 
   /** @type {{ syncMcpShadows?: Function } | null} */
   const shadowApi = registerShadowTools(pi);
 
-  /** @type {unknown} */
-  let lastModel = null;
   /** @type {{ notify?: Function } | null} */
   let lastUi = null;
 
@@ -367,7 +418,7 @@ export default async function register(pi) {
     pi,
     client,
     shadowApi,
-    getModel: () => lastModel,
+    getModel: () => _lastModel,
     notify: (msg, level) => {
       try {
         lastUi?.notify?.(msg, level || "info");
@@ -380,14 +431,14 @@ export default async function register(pi) {
   if (typeof pi.on === "function") {
     pi.on("session_start", async (event, ctx) => {
       captureUi(event, ctx);
-      lastModel = ctx?.model || event?.model || lastModel;
+      _lastModel = ctx?.model || event?.model || _lastModel;
       if (ctx?.ui) lastUi = ctx.ui;
       installGenerationSpeedFooter(ctx);
       if (!client) return;
       try {
-        await handshakeWorkspaceCwd(client, ctx, ctx);
+        await ensureCursorRemoteSession(ctx);
       } catch {
-        // notify already emitted; keep going so models refresh can still run
+        // notify already emitted from handshake
       }
       try {
         await shadowApi?.syncMcpShadows?.(client, ctx?.model);
@@ -395,8 +446,6 @@ export default async function register(pi) {
         // MCP optional
       }
       try {
-        // Wait for VPS models_catalog (live) so the picker is not stuck on the
-        // 3-id fallback until the user reloads the agent.
         const next = await fetchProviderModels(client, {
           timeoutMs: 20000,
           preferLive: true,
@@ -404,11 +453,21 @@ export default async function register(pi) {
         registerCursorRemoteProvider(pi, next);
         const cur = ctx?.model?.id || event?.model?.id;
         const resolved = resolveModelOrFallback(cur, next);
-        if (cur && resolved !== cur && typeof ctx?.ui?.notify === "function") {
-          ctx.ui.notify(
-            `Model "${cur}" unavailable; falling back to ${resolved}.`,
-            "warning"
-          );
+        if (
+          cur &&
+          resolved !== cur &&
+          !String(resolved).startsWith(String(cur).split(/[@:]/)[0]) &&
+          typeof ctx?.ui?.notify === "function"
+        ) {
+          // Only warn when base id truly missing (not :slow / @context rematch).
+          const baseCur = String(cur).split(/[@:]/)[0];
+          const baseRes = String(resolved).split(/[@:]/)[0];
+          if (baseCur !== baseRes) {
+            ctx.ui.notify(
+              `Model "${cur}" unavailable; falling back to ${resolved}.`,
+              "warning"
+            );
+          }
         } else if (next.length > 3 && typeof ctx?.ui?.notify === "function") {
           ctx.ui.notify(
             `Cursor Remote models ready (${next.length}).`,
@@ -419,14 +478,21 @@ export default async function register(pi) {
         // keep previous registration
       }
     });
-    pi.on("before_agent_start", (event, ctx) => {
+    pi.on("before_agent_start", async (event, ctx) => {
       captureUi(event, ctx);
-      lastModel = ctx?.model || lastModel;
+      _lastModel = ctx?.model || _lastModel;
       if (ctx?.ui) lastUi = ctx.ui;
+      if (client) {
+        try {
+          await ensureCursorRemoteSession(ctx);
+        } catch {
+          // prompt path will surface the error
+        }
+      }
     });
     pi.on("model_select", (_event, ctx) => {
       captureUi(_event, ctx);
-      lastModel = ctx?.model || lastModel;
+      _lastModel = ctx?.model || _lastModel;
       if (ctx?.ui) lastUi = ctx.ui;
     });
   }
