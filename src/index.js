@@ -41,6 +41,8 @@ import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js"
 import {
   buildCursorModelSelection,
   fallbackProviderModels,
+  cachedProviderModels,
+  saveModelsCache,
   registerModelItems,
   resolveModelOrFallback,
 } from "./model-discovery.js";
@@ -174,6 +176,13 @@ async function fetchProviderModels(client, opts = {}) {
       const json = await client.getModels();
       if (json?.ok && Array.isArray(json.models) && json.models.length) {
         last = registerModelItems(json.models);
+        if (json.live) {
+          try {
+            saveModelsCache(json.models);
+          } catch {
+            // cache is best-effort
+          }
+        }
         if (!preferLive || json.live || !deadline) {
           return last;
         }
@@ -379,7 +388,7 @@ export default async function register(pi) {
 
   let models;
   try {
-    models = fallbackProviderModels();
+    models = cachedProviderModels() || fallbackProviderModels();
   } catch {
     models = [
       {
@@ -459,8 +468,14 @@ export default async function register(pi) {
         });
         registerCursorRemoteProvider(pi, next);
         const cur = ctx?.model?.id || event?.model?.id;
+        const curProv = ctx?.model?.provider || event?.model?.provider;
         const resolved = resolveModelOrFallback(cur, next);
-        if (
+        if (curProv && curProv !== "cursor-remote" && typeof ctx?.ui?.notify === "function") {
+          ctx.ui.notify(
+            `Session model is ${curProv}/${cur || "?"}. Switch to Cursor Remote (${resolved}).`,
+            "warning"
+          );
+        } else if (
           cur &&
           resolved !== cur &&
           !String(resolved).startsWith(String(cur).split(/[@:]/)[0]) &&
@@ -603,6 +618,10 @@ export {
   fallbackProviderModels,
   encodePiModelId,
   parsePiModelId,
+  cachedProviderModels,
+  saveModelsCache,
+  loadModelsCache,
+  modelsCachePath,
 } from "./model-discovery.js";
 export { tryApplyWireUsage, applyCursorSdkUsage } from "./usage-accounting.js";
 export {

@@ -7,7 +7,9 @@
  * :fast / @context params.
  */
 
-import { DEFAULT_MODEL } from "./config.js";
+import { DEFAULT_MODEL, defaultConfigPath } from "./config.js";
+import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const FALLBACK_CONTEXT_WINDOW = 128000;
 const FALLBACK_MAX_TOKENS = 8192;
@@ -478,4 +480,56 @@ export function resolveModelOrFallback(currentId, providerModels) {
   }
   if (ids.has(DEFAULT_MODEL)) return DEFAULT_MODEL;
   return list[0]?.id || DEFAULT_MODEL;
+}
+
+const MODELS_CACHE_NAME = "cursor-remote-models-cache.json";
+const MAX_CACHED_MODELS = 80;
+
+export function modelsCachePath() {
+  return join(dirname(defaultConfigPath()), MODELS_CACHE_NAME);
+}
+
+function sanitizeCatalogItem(item) {
+  if (!item || typeof item.id !== "string" || !item.id.trim()) return null;
+  return {
+    id: item.id.trim().slice(0, 128),
+    display_name: String(item.display_name || item.displayName || item.id).slice(0, 200),
+    parameters: Array.isArray(item.parameters) ? item.parameters : [],
+    variants: Array.isArray(item.variants) ? item.variants : [],
+  };
+}
+
+/** Persist last live VPS catalog so Pi can restore grok-*:slow before GET /models. */
+export function saveModelsCache(items) {
+  const models = (items || []).map(sanitizeCatalogItem).filter(Boolean).slice(0, MAX_CACHED_MODELS);
+  if (!models.length) return;
+  const path = modelsCachePath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({ savedAt: Date.now(), models }, null, 0),
+    { encoding: "utf8", mode: 0o600 }
+  );
+}
+
+export function loadModelsCache() {
+  const path = modelsCachePath();
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    const models = Array.isArray(raw?.models) ? raw.models : null;
+    if (!models?.length) return null;
+    const clean = models.map(sanitizeCatalogItem).filter(Boolean);
+    return clean.length ? clean : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Last cached catalog as provider models, or null. */
+export function cachedProviderModels() {
+  const items = loadModelsCache();
+  if (!items) return null;
+  const configs = registerModelItems(items);
+  return configs.length ? configs : null;
 }

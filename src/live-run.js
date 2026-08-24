@@ -171,7 +171,15 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
       }
     } catch (err) {
       const name = err && typeof err === "object" && "name" in err ? err.name : "";
-      if (name !== "AbortError") {
+      if (name === "AbortError") {
+        // Our 10m timer (not pi's cancel): surface a real error instead of a
+        // silent close that the TUI paints as "Error: aborted".
+        if (!(signal && signal.aborted)) {
+          session.error = new Error(
+            `bridge event wait timed out (${Math.round(timeoutMs / 1000)}s)`
+          );
+        }
+      } else {
         session.error =
           err instanceof Error ? err : new Error(String(err ?? "sse error"));
       }
