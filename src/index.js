@@ -311,6 +311,27 @@ export default async function register(pi) {
     if (ctx?.ui) bindThinkingUi(ctx.ui);
   };
 
+  let models;
+  try {
+    models = fallbackProviderModels();
+  } catch {
+    models = [
+      {
+        id: DEFAULT_MODEL,
+        name: "Composer 2.5",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 8192,
+      },
+    ];
+  }
+
+  // Register immediately so pi TUI has a model + slash commands even if the
+  // bridge GET /models hangs (no HTTP timeout on the client).
+  registerCursorRemoteProvider(pi, models);
+
   const client =
     conn.baseUrl || conn.unixPath
       ? new BridgeClient({
@@ -319,11 +340,6 @@ export default async function register(pi) {
           unixPath: conn.unixPath,
         })
       : null;
-
-  let models = fallbackProviderModels();
-  if (client) {
-    models = await fetchProviderModels(client);
-  }
 
   /** @type {{ syncMcpShadows?: Function } | null} */
   const shadowApi = registerShadowTools(pi);
@@ -443,8 +459,6 @@ export default async function register(pi) {
       },
     });
   }
-
-  registerCursorRemoteProvider(pi, models);
 }
 
 export {

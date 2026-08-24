@@ -19,14 +19,37 @@ const ZERO_COST = Object.freeze({
 });
 
 const META_KEY = Symbol.for("pi-cursor-remote.model-metadata.v1");
+const META_KEY_STR = "__pi_cursor_remote_model_metadata_v1";
+
+/** Module-local Map; share via globalThis when the host allows it (jiti split). */
+const _localMeta = new Map();
 
 /** @returns {Map<string, object>} */
 function metadataByPiModelId() {
-  const g = globalThis;
-  if (!g[META_KEY]) {
-    g[META_KEY] = new Map();
+  try {
+    const g = globalThis;
+    if (g && (typeof g === "object" || typeof g === "function")) {
+      let store = g[META_KEY];
+      if (!(store instanceof Map)) store = g[META_KEY_STR];
+      if (!(store instanceof Map)) {
+        store = _localMeta;
+        try {
+          g[META_KEY] = store;
+        } catch {
+          // frozen / vm globalThis
+        }
+        try {
+          g[META_KEY_STR] = store;
+        } catch {
+          // ignore
+        }
+      }
+      return store;
+    }
+  } catch {
+    // ignore
   }
-  return g[META_KEY];
+  return _localMeta;
 }
 
 /**
@@ -219,16 +242,22 @@ function getModelName(item, context, fastOverride) {
 }
 
 function getContextValues(item) {
-  return getParameter(item, "context")?.values?.map((v) => v.value) ?? [];
+  const raw = getParameter(item, "context")?.values;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((v) => (v && typeof v.value === "string" ? v.value : String(v?.value ?? "")))
+    .filter((v) => v && v !== "undefined");
 }
+
+const MAX_PICKER_MODELS = 96;
 
 /**
  * @param {object[]} items
  * @returns {object[]}
  */
 export function registerModelItems(items) {
-  const meta = metadataByPiModelId();
-  meta.clear();
+  const store = metadataByPiModelId();
+  store.clear();
   const used = new Set();
   const configs = [];
   const sorted = [...(items || [])].sort((a, b) =>
@@ -258,7 +287,7 @@ export function registerModelItems(items) {
         const thinkingLevelMap = getThinkingLevelMap(item);
         const contextWindow =
           (context ? parseContextWindow(context) : undefined) ?? FALLBACK_CONTEXT_WINDOW;
-        const meta = {
+        const entry = {
           piModelId,
           baseModelId: item.id,
           selectionModelId: item.id,
@@ -279,7 +308,7 @@ export function registerModelItems(items) {
             fast: getParameter(item, "fast") !== undefined,
           },
         };
-        metadataByPiModelId().set(piModelId, meta);
+        store.set(piModelId, entry);
         configs.push({
           id: piModelId,
           name: getModelName(item, context, fastOverride),
@@ -290,6 +319,9 @@ export function registerModelItems(items) {
           contextWindow,
           maxTokens: FALLBACK_MAX_TOKENS,
         });
+        if (configs.length >= MAX_PICKER_MODELS) {
+          return configs;
+        }
       }
     }
   }

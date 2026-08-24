@@ -120,6 +120,9 @@ export function installMcpAutoRefresh(opts) {
       if (!before?.enabled) {
         return;
       }
+      if (before.ready === false) {
+        return;
+      }
       const beforeNames = (before.tools || [])
         .map((t) => (t && typeof t.name === "string" ? t.name : ""))
         .filter(Boolean)
