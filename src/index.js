@@ -489,6 +489,7 @@ export {
   registerModelItems,
   fallbackProviderModels,
   encodePiModelId,
+  parsePiModelId,
 } from "./model-discovery.js";
 export { tryApplyWireUsage, applyCursorSdkUsage } from "./usage-accounting.js";
 export {

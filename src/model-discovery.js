@@ -1,6 +1,10 @@
 /**
  * Expand VPS models_catalog into pi registerProvider models (pi-cursor-sdk style).
  * Encodes variants as id@context:fast|:slow and builds ModelSelection for /prompt.
+ *
+ * Catalog metadata lives on globalThis (Symbol.for) so jiti/static vs dynamic
+ * imports share one Map — otherwise streamSimple builds a bare id and drops
+ * :fast / @context params.
  */
 
 import { DEFAULT_MODEL } from "./config.js";
@@ -14,8 +18,16 @@ const ZERO_COST = Object.freeze({
   cacheWrite: 0,
 });
 
-/** @type {Map<string, object>} */
-const metadataByPiModelId = new Map();
+const META_KEY = Symbol.for("pi-cursor-remote.model-metadata.v1");
+
+/** @returns {Map<string, object>} */
+function metadataByPiModelId() {
+  const g = globalThis;
+  if (!g[META_KEY]) {
+    g[META_KEY] = new Map();
+  }
+  return g[META_KEY];
+}
 
 /**
  * @param {unknown} item
@@ -164,6 +176,37 @@ export function encodePiModelId(modelId, context, fastOverride) {
   return contextQualified;
 }
 
+/**
+ * Inverse of encodePiModelId. Safe on bare catalog ids.
+ * @param {unknown} modelId
+ * @returns {{ baseId: string, context: string|undefined, fastOverride: boolean|undefined }}
+ */
+export function parsePiModelId(modelId) {
+  const raw = typeof modelId === "string" ? modelId.trim() : "";
+  if (!raw) {
+    return { baseId: DEFAULT_MODEL, context: undefined, fastOverride: undefined };
+  }
+  let rest = raw;
+  /** @type {boolean|undefined} */
+  let fastOverride;
+  if (rest.endsWith(":fast")) {
+    fastOverride = true;
+    rest = rest.slice(0, -":fast".length);
+  } else if (rest.endsWith(":slow")) {
+    fastOverride = false;
+    rest = rest.slice(0, -":slow".length);
+  }
+  const at = rest.lastIndexOf("@");
+  let baseId = rest;
+  /** @type {string|undefined} */
+  let context;
+  if (at > 0) {
+    baseId = rest.slice(0, at);
+    context = rest.slice(at + 1) || undefined;
+  }
+  return { baseId: baseId || DEFAULT_MODEL, context, fastOverride };
+}
+
 function getModelName(item, context, fastOverride) {
   const displayName = item.display_name || item.displayName || item.id;
   const qualifiers = [];
@@ -184,7 +227,8 @@ function getContextValues(item) {
  * @returns {object[]}
  */
 export function registerModelItems(items) {
-  metadataByPiModelId.clear();
+  const meta = metadataByPiModelId();
+  meta.clear();
   const used = new Set();
   const configs = [];
   const sorted = [...(items || [])].sort((a, b) =>
@@ -235,7 +279,7 @@ export function registerModelItems(items) {
             fast: getParameter(item, "fast") !== undefined,
           },
         };
-        metadataByPiModelId.set(piModelId, meta);
+        metadataByPiModelId().set(piModelId, meta);
         configs.push({
           id: piModelId,
           name: getModelName(item, context, fastOverride),
@@ -257,7 +301,7 @@ export function registerModelItems(items) {
 }
 
 export function fallbackProviderModels() {
-  metadataByPiModelId.clear();
+  metadataByPiModelId().clear();
   const items = [
     { id: DEFAULT_MODEL, display_name: "Composer 2.5", parameters: [], variants: [] },
     { id: "auto", display_name: "Auto", parameters: [], variants: [] },
@@ -288,11 +332,11 @@ export function fallbackProviderModels() {
 }
 
 export function getCursorModelMetadata(modelId) {
-  return metadataByPiModelId.get(modelId);
+  return metadataByPiModelId().get(modelId);
 }
 
 export function knownPiModelIds() {
-  return new Set(metadataByPiModelId.keys());
+  return new Set(metadataByPiModelId().keys());
 }
 
 /**
@@ -348,16 +392,21 @@ function applyThinkingLevel(metadata, params, level) {
  */
 export function buildCursorModelSelection(modelId, thinkingLevel = "off") {
   const metadata = getCursorModelMetadata(modelId);
-  if (!metadata) {
-    // Bare id or unknown — soft fallback handled on bridge/VPS.
-    const base = typeof modelId === "string" && modelId ? modelId : DEFAULT_MODEL;
-    return { id: base.split("@")[0].replace(/:(?:fast|slow)$/, "") || DEFAULT_MODEL };
+  if (metadata) {
+    const params = cloneParams(metadata.defaultParams);
+    applyThinkingLevel(metadata, params, thinkingLevel);
+    return params.length
+      ? { id: metadata.selectionModelId, params }
+      : { id: metadata.selectionModelId };
   }
-  const params = cloneParams(metadata.defaultParams);
-  applyThinkingLevel(metadata, params, thinkingLevel);
-  return params.length
-    ? { id: metadata.selectionModelId, params }
-    : { id: metadata.selectionModelId };
+  // Catalog Map missing (jiti split) or unknown picker id — still honor
+  // @context / :fast|:slow so sticky SendOptions is not a bare composer id.
+  const parsed = parsePiModelId(modelId);
+  const params = [];
+  if (parsed.context) params.push({ id: "context", value: parsed.context });
+  if (parsed.fastOverride === true) params.push({ id: "fast", value: "true" });
+  if (parsed.fastOverride === false) params.push({ id: "fast", value: "false" });
+  return params.length ? { id: parsed.baseId, params } : { id: parsed.baseId };
 }
 
 /**
