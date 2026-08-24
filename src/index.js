@@ -122,17 +122,31 @@ function registerCursorRemoteProvider(pi, models) {
 
 /**
  * @param {BridgeClient} client
+ * @param {{ timeoutMs?: number, preferLive?: boolean }} [opts]
  */
-async function fetchProviderModels(client) {
-  try {
-    const json = await client.getModels();
-    if (json?.ok && Array.isArray(json.models) && json.models.length) {
-      return registerModelItems(json.models);
+async function fetchProviderModels(client, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 0;
+  const preferLive = opts.preferLive !== false;
+  const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
+  let last = null;
+  for (;;) {
+    try {
+      const json = await client.getModels();
+      if (json?.ok && Array.isArray(json.models) && json.models.length) {
+        last = registerModelItems(json.models);
+        if (!preferLive || json.live || !deadline) {
+          return last;
+        }
+      }
+    } catch {
+      // bridge not ready / no catalog yet
     }
-  } catch {
-    // bridge not ready / no catalog yet
+    if (!deadline || Date.now() >= deadline) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 400));
   }
-  return fallbackProviderModels();
+  return last || fallbackProviderModels();
 }
 
 function streamSimple(model, context, options) {
@@ -381,7 +395,12 @@ export default async function register(pi) {
         // MCP optional
       }
       try {
-        const next = await fetchProviderModels(client);
+        // Wait for VPS models_catalog (live) so the picker is not stuck on the
+        // 3-id fallback until the user reloads the agent.
+        const next = await fetchProviderModels(client, {
+          timeoutMs: 20000,
+          preferLive: true,
+        });
         registerCursorRemoteProvider(pi, next);
         const cur = ctx?.model?.id || event?.model?.id;
         const resolved = resolveModelOrFallback(cur, next);
@@ -389,6 +408,11 @@ export default async function register(pi) {
           ctx.ui.notify(
             `Model "${cur}" unavailable; falling back to ${resolved}.`,
             "warning"
+          );
+        } else if (next.length > 3 && typeof ctx?.ui?.notify === "function") {
+          ctx.ui.notify(
+            `Cursor Remote models ready (${next.length}).`,
+            "info"
           );
         }
       } catch {
