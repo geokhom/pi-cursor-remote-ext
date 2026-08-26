@@ -12,18 +12,18 @@ import { dirname, join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 /**
- * Catalog omits `context` for composer-2.5 (only `fast`). 128k was a pi-ai
- * default and made the footer look empty while cache_read was already 100k+.
- * Third-party / Cursor-family figure for composer-2.5 is 256k; grow from usage
- * in the footer if a turn reports more.
+ * Catalog omits `context` for composer-2.5 (only `fast`). Cold-start only until
+ * VPS learns `tokenDetails.maxTokens` from an SDK checkpoint and sends
+ * `models_catalog.context_window`. Match Cursor UI / pi-cursor-sdk: 200k.
+ * Run-sum SDK usage above the window is rejected in usage-accounting (not grown).
  */
-const FALLBACK_CONTEXT_WINDOW = 256000;
+const FALLBACK_CONTEXT_WINDOW = 200000;
 const FALLBACK_MAX_TOKENS = 8192;
 
 /** @type {Record<string, number>} */
 const KNOWN_CONTEXT_WINDOWS = {
-  "composer-2.5": 256000,
-  "composer-2": 256000,
+  "composer-2.5": 200000,
+  "composer-2": 200000,
 };
 const ZERO_COST = Object.freeze({
   input: 0,
@@ -167,10 +167,15 @@ export function parseContextWindow(value) {
 /**
  * @param {string} modelId catalog / pi base id
  * @param {string | undefined} context catalog `context` value (`200k`, `1m`, …)
+ * @param {number | undefined} [explicitWindow] learned `models_catalog.context_window`
+ *
+ * Priority: variant `context` label → catalog learned/enriched window → cold known/200k.
  */
-export function resolveContextWindow(modelId, context) {
+export function resolveContextWindow(modelId, context, explicitWindow) {
   const fromParam = context ? parseContextWindow(context) : undefined;
   if (fromParam) return fromParam;
+  const explicit = Number(explicitWindow);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
   const id = typeof modelId === "string" ? modelId : "";
   return KNOWN_CONTEXT_WINDOWS[id] ?? FALLBACK_CONTEXT_WINDOW;
 }
@@ -310,7 +315,13 @@ export function registerModelItems(items) {
         if (used.has(piModelId)) continue;
         used.add(piModelId);
         const thinkingLevelMap = getThinkingLevelMap(item);
-        const contextWindow = resolveContextWindow(item.id, context);
+        const explicitWindow =
+          typeof item.context_window === "number"
+            ? item.context_window
+            : typeof item.contextWindow === "number"
+              ? item.contextWindow
+              : undefined;
+        const contextWindow = resolveContextWindow(item.id, context, explicitWindow);
         const entry = {
           piModelId,
           baseModelId: item.id,

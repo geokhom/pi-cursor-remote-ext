@@ -147,10 +147,15 @@ export function promptOccupancyFromPiUsage(u) {
 /**
  * Last significant prompt occupancy in session order (not the cumulative R sum,
  * not the latest input=1 tool-resume turn).
+ * When contextWindow is set, skip measurements above it (run-sum / unsafe SDK
+ * totals must not drive fill% — same gate as pi-cursor-sdk).
  * @param {object[]} entries
+ * @param {number} [contextWindow]
  */
-export function lastPromptOccupancy(entries) {
+export function lastPromptOccupancy(entries, contextWindow) {
   let last = 0;
+  const max =
+    Number(contextWindow) > 0 ? Number(contextWindow) : Number.POSITIVE_INFINITY;
   for (const entry of entries || []) {
     /** @type {object | undefined} */
     let u;
@@ -162,7 +167,7 @@ export function lastPromptOccupancy(entries) {
       u = entry.usage;
     }
     const n = promptOccupancyFromPiUsage(u);
-    if (n >= MIN_PROMPT_OCCUPANCY) last = n;
+    if (n >= MIN_PROMPT_OCCUPANCY && n <= max) last = n;
   }
   return last;
 }
@@ -265,7 +270,9 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
       cacheRead += Number(u.cacheRead) || 0;
       cacheWrite += Number(u.cacheWrite) || 0;
       cost += Number(u.cost?.total) || 0;
-      if (promptOccupancyFromPiUsage(u) >= MIN_PROMPT_OCCUPANCY) {
+      const n = promptOccupancyFromPiUsage(u);
+      // Window filter applied after advertisedWindow is known (below).
+      if (n >= MIN_PROMPT_OCCUPANCY) {
         lastSignificantUsage = u;
       }
     } else if (
@@ -292,6 +299,19 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
     }
   }
 
+  const contextUsage =
+    typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+  const advertisedWindow =
+    ctx.model?.contextWindow ?? contextUsage?.contextWindow ?? 0;
+  const contextWindow = advertisedWindow;
+  if (
+    lastSignificantUsage &&
+    contextWindow > 0 &&
+    promptOccupancyFromPiUsage(lastSignificantUsage) > contextWindow
+  ) {
+    lastSignificantUsage = undefined;
+  }
+
   if (lastSignificantUsage) {
     const promptTokens = promptOccupancyFromPiUsage(lastSignificantUsage);
     latestCacheHitRate =
@@ -300,17 +320,16 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
         : undefined;
   }
 
-  const occupancy = lastPromptOccupancy(entries);
-  const contextUsage =
-    typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
-  const advertisedWindow =
-    ctx.model?.contextWindow ?? contextUsage?.contextWindow ?? 0;
-  const contextWindow = advertisedWindow;
+  const occupancy = lastPromptOccupancy(entries, contextWindow);
   let contextPercentValue;
   let contextPercent;
   if (occupancy > 0 && contextWindow > 0) {
     contextPercentValue = (occupancy / contextWindow) * 100;
     contextPercent = contextPercentValue.toFixed(1);
+  } else if (contextWindow > 0) {
+    // No in-window measurement (oversized run-sum rejected, or only crumbs).
+    contextPercentValue = 0;
+    contextPercent = "?";
   } else {
     contextPercentValue = contextUsage?.percent ?? 0;
     contextPercent =

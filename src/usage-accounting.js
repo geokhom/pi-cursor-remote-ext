@@ -1,13 +1,12 @@
 /**
  * Map Cursor SDK TokenUsage (run_finished.usage) → pi-ai Usage fields.
- * Mirrors pi-cursor-sdk applyCursorSdkUsage.
- *
- * Do not reject usage just because it exceeds the advertised contextWindow:
- * composer-2.5 has no catalog `context` param (pi used to fall back to 128k)
- * while live turns report cache_read well above that. Reject only garbage.
+ * Mirrors pi-cursor-sdk cursor-usage-accounting.ts:
+ * - inputTokens is the full prompt; cache fields partition it when inside input
+ * - reject usage for pi messages when input+output exceeds model.contextWindow
+ *   (run-sum / multi-step aggregates must not drive footer fill% or auto-compact)
  */
 
-/** Sanity cap: reject clearly broken SDK numbers, not real occupancy. */
+/** Sanity cap for clearly broken numbers when no contextWindow is set. */
 export const USAGE_SANITY_MAX = 2_000_000;
 export const OUTPUT_SANITY_MAX = 200_000;
 
@@ -65,10 +64,13 @@ export function promptOccupancyTokens(turnUsage) {
 }
 
 /**
+ * Partition + output bounds (pi-cursor-sdk isCursorSdkUsagePartitionSafe).
  * @param {CursorSdkTurnUsage} turnUsage
- * @param {{ contextWindow?: number, maxTokens?: number } | undefined} [_model]
+ * @param {{ maxTokens?: number } | undefined} [model]
  */
-export function isCursorSdkUsageSafeForPiMessage(turnUsage, _model) {
+export function isCursorSdkUsagePartitionSafe(turnUsage, model) {
+  const maxOut =
+    Number(model?.maxTokens) > 0 ? Number(model.maxTokens) : OUTPUT_SANITY_MAX;
   const counts = [
     turnUsage.inputTokens,
     turnUsage.outputTokens,
@@ -76,15 +78,28 @@ export function isCursorSdkUsageSafeForPiMessage(turnUsage, _model) {
     turnUsage.cacheWriteTokens,
   ];
   const uncached = getUncachedInput(turnUsage);
-  const occupancy = promptOccupancyTokens(turnUsage);
   return (
     counts.every((c) => Number.isFinite(c) && c >= 0 && c <= USAGE_SANITY_MAX) &&
     Number.isFinite(uncached) &&
     uncached >= 0 &&
     uncached <= USAGE_SANITY_MAX &&
-    occupancy <= USAGE_SANITY_MAX &&
-    turnUsage.outputTokens <= OUTPUT_SANITY_MAX
+    turnUsage.outputTokens <= maxOut
   );
+}
+
+/**
+ * Safe to attach to a pi assistant message / drive footer fill%.
+ * Run-sum usage above contextWindow is rejected (Agent multi-step totals).
+ * @param {CursorSdkTurnUsage} turnUsage
+ * @param {{ contextWindow?: number, maxTokens?: number } | undefined} [model]
+ */
+export function isCursorSdkUsageSafeForPiMessage(turnUsage, model) {
+  if (!isCursorSdkUsagePartitionSafe(turnUsage, model)) return false;
+  const window = Number(model?.contextWindow) || 0;
+  if (window > 0) {
+    return turnUsage.inputTokens + turnUsage.outputTokens <= window;
+  }
+  return promptOccupancyTokens(turnUsage) <= USAGE_SANITY_MAX;
 }
 
 /**
@@ -96,7 +111,10 @@ export function applyCursorSdkUsage(partial, turnUsage) {
   partial.usage.output = turnUsage.outputTokens;
   partial.usage.cacheRead = turnUsage.cacheReadTokens;
   partial.usage.cacheWrite = turnUsage.cacheWriteTokens;
-  partial.usage.totalTokens = promptOccupancyTokens(turnUsage) + turnUsage.outputTokens;
+  // Occupancy = full prompt + output (native: inputTokens + outputTokens when
+  // cache partitions input; our uncached+cache matches that shape).
+  partial.usage.totalTokens =
+    promptOccupancyTokens(turnUsage) + turnUsage.outputTokens;
 }
 
 /**
