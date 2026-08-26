@@ -128,6 +128,49 @@ export function peekTokPerSecLabel() {
  * Compact token count (matches stock pi footer).
  * @param {number} count
  */
+/** Skip char/4 crumbs from tool-resume turns (input=1) when finding occupancy. */
+const MIN_PROMPT_OCCUPANCY = 256;
+
+/**
+ * Prompt tokens on one pi usage object (uncached + cache).
+ * @param {object | undefined} u
+ */
+export function promptOccupancyFromPiUsage(u) {
+  if (!u || typeof u !== "object") return 0;
+  const n =
+    (Number(u.input) || 0) +
+    (Number(u.cacheRead) || 0) +
+    (Number(u.cacheWrite) || 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Last significant prompt occupancy in session order (not the cumulative R sum,
+ * not the latest input=1 tool-resume turn).
+ * @param {object[]} entries
+ */
+export function lastPromptOccupancy(entries) {
+  let last = 0;
+  for (const entry of entries || []) {
+    /** @type {object | undefined} */
+    let u;
+    if (entry?.type === "message" && entry.message?.role === "assistant") {
+      u = entry.message.usage;
+    } else if (entry?.type === "message" && entry.message?.role === "toolResult") {
+      u = entry.message.usage;
+    } else if (entry?.type === "branch_summary" || entry?.type === "compaction") {
+      u = entry.usage;
+    }
+    const n = promptOccupancyFromPiUsage(u);
+    if (n >= MIN_PROMPT_OCCUPANCY) last = n;
+  }
+  return last;
+}
+
+/**
+ * Compact token count (matches stock pi footer).
+ * @param {number} count
+ */
 export function formatFooterTokens(count) {
   if (count < 1000) return count.toString();
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -208,6 +251,8 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
   let cost = 0;
   /** @type {number | undefined} */
   let latestCacheHitRate;
+  /** @type {object | undefined} */
+  let lastSignificantUsage;
   const entries =
     typeof ctx.sessionManager?.getEntries === "function"
       ? ctx.sessionManager.getEntries()
@@ -220,14 +265,9 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
       cacheRead += Number(u.cacheRead) || 0;
       cacheWrite += Number(u.cacheWrite) || 0;
       cost += Number(u.cost?.total) || 0;
-      const promptTokens =
-        (Number(u.input) || 0) +
-        (Number(u.cacheRead) || 0) +
-        (Number(u.cacheWrite) || 0);
-      latestCacheHitRate =
-        promptTokens > 0
-          ? ((Number(u.cacheRead) || 0) / promptTokens) * 100
-          : undefined;
+      if (promptOccupancyFromPiUsage(u) >= MIN_PROMPT_OCCUPANCY) {
+        lastSignificantUsage = u;
+      }
     } else if (
       entry?.type === "message" &&
       entry.message?.role === "toolResult" &&
@@ -252,16 +292,32 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
     }
   }
 
+  if (lastSignificantUsage) {
+    const promptTokens = promptOccupancyFromPiUsage(lastSignificantUsage);
+    latestCacheHitRate =
+      promptTokens > 0
+        ? ((Number(lastSignificantUsage.cacheRead) || 0) / promptTokens) * 100
+        : undefined;
+  }
+
+  const occupancy = lastPromptOccupancy(entries);
   const contextUsage =
     typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
-  const contextWindow =
-    contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-  const contextPercentValue = contextUsage?.percent ?? 0;
-  const contextPercent =
-    contextUsage?.percent != null && contextUsage.percent !== null
-      ? Number(contextUsage.percent).toFixed(1)
-      : "?";
-
+  const advertisedWindow =
+    ctx.model?.contextWindow ?? contextUsage?.contextWindow ?? 0;
+  const contextWindow = advertisedWindow;
+  let contextPercentValue;
+  let contextPercent;
+  if (occupancy > 0 && contextWindow > 0) {
+    contextPercentValue = (occupancy / contextWindow) * 100;
+    contextPercent = contextPercentValue.toFixed(1);
+  } else {
+    contextPercentValue = contextUsage?.percent ?? 0;
+    contextPercent =
+      contextUsage?.percent != null && contextUsage.percent !== null
+        ? Number(contextUsage.percent).toFixed(1)
+        : "?";
+  }
   let pwd =
     typeof ctx.sessionManager?.getCwd === "function"
       ? String(ctx.sessionManager.getCwd() || "")

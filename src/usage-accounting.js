@@ -1,7 +1,15 @@
 /**
  * Map Cursor SDK TokenUsage (run_finished.usage) → pi-ai Usage fields.
  * Mirrors pi-cursor-sdk applyCursorSdkUsage.
+ *
+ * Do not reject usage just because it exceeds the advertised contextWindow:
+ * composer-2.5 has no catalog `context` param (pi used to fall back to 128k)
+ * while live turns report cache_read well above that. Reject only garbage.
  */
+
+/** Sanity cap: reject clearly broken SDK numbers, not real occupancy. */
+export const USAGE_SANITY_MAX = 2_000_000;
+export const OUTPUT_SANITY_MAX = 200_000;
 
 /**
  * @typedef {{
@@ -33,17 +41,34 @@ export function readCursorSdkTurnUsage(value) {
 }
 
 /**
+ * Uncached prompt tokens. Some runtimes put cache inside `input_tokens`;
+ * others report `input_tokens` as uncached-only (then input − cache is negative).
  * @param {CursorSdkTurnUsage} turnUsage
  */
-function getUncachedInput(turnUsage) {
-  return turnUsage.inputTokens - turnUsage.cacheReadTokens - turnUsage.cacheWriteTokens;
+export function getUncachedInput(turnUsage) {
+  const raw =
+    turnUsage.inputTokens - turnUsage.cacheReadTokens - turnUsage.cacheWriteTokens;
+  if (Number.isFinite(raw) && raw >= 0) return raw;
+  return turnUsage.inputTokens;
+}
+
+/**
+ * Prompt occupancy this turn (what the model saw), not the uncached delta.
+ * @param {CursorSdkTurnUsage} turnUsage
+ */
+export function promptOccupancyTokens(turnUsage) {
+  return (
+    getUncachedInput(turnUsage) +
+    turnUsage.cacheReadTokens +
+    turnUsage.cacheWriteTokens
+  );
 }
 
 /**
  * @param {CursorSdkTurnUsage} turnUsage
- * @param {{ contextWindow?: number, maxTokens?: number } | undefined} model
+ * @param {{ contextWindow?: number, maxTokens?: number } | undefined} [_model]
  */
-export function isCursorSdkUsageSafeForPiMessage(turnUsage, model) {
+export function isCursorSdkUsageSafeForPiMessage(turnUsage, _model) {
   const counts = [
     turnUsage.inputTokens,
     turnUsage.outputTokens,
@@ -51,14 +76,14 @@ export function isCursorSdkUsageSafeForPiMessage(turnUsage, model) {
     turnUsage.cacheWriteTokens,
   ];
   const uncached = getUncachedInput(turnUsage);
-  const contextWindow = model?.contextWindow || 128000;
-  const maxTokens = model?.maxTokens || 8192;
+  const occupancy = promptOccupancyTokens(turnUsage);
   return (
-    counts.every((c) => Number.isFinite(c) && c >= 0) &&
+    counts.every((c) => Number.isFinite(c) && c >= 0 && c <= USAGE_SANITY_MAX) &&
     Number.isFinite(uncached) &&
     uncached >= 0 &&
-    turnUsage.outputTokens <= maxTokens &&
-    turnUsage.inputTokens + turnUsage.outputTokens <= contextWindow
+    uncached <= USAGE_SANITY_MAX &&
+    occupancy <= USAGE_SANITY_MAX &&
+    turnUsage.outputTokens <= OUTPUT_SANITY_MAX
   );
 }
 
@@ -71,7 +96,7 @@ export function applyCursorSdkUsage(partial, turnUsage) {
   partial.usage.output = turnUsage.outputTokens;
   partial.usage.cacheRead = turnUsage.cacheReadTokens;
   partial.usage.cacheWrite = turnUsage.cacheWriteTokens;
-  partial.usage.totalTokens = turnUsage.inputTokens + turnUsage.outputTokens;
+  partial.usage.totalTokens = promptOccupancyTokens(turnUsage) + turnUsage.outputTokens;
 }
 
 /**

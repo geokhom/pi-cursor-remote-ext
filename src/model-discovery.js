@@ -11,8 +11,20 @@ import { DEFAULT_MODEL, defaultConfigPath } from "./config.js";
 import { dirname, join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-const FALLBACK_CONTEXT_WINDOW = 128000;
+/**
+ * Catalog omits `context` for composer-2.5 (only `fast`). 128k was a pi-ai
+ * default and made the footer look empty while cache_read was already 100k+.
+ * Third-party / Cursor-family figure for composer-2.5 is 256k; grow from usage
+ * in the footer if a turn reports more.
+ */
+const FALLBACK_CONTEXT_WINDOW = 256000;
 const FALLBACK_MAX_TOKENS = 8192;
+
+/** @type {Record<string, number>} */
+const KNOWN_CONTEXT_WINDOWS = {
+  "composer-2.5": 256000,
+  "composer-2": 256000,
+};
 const ZERO_COST = Object.freeze({
   input: 0,
   output: 0,
@@ -143,13 +155,24 @@ export function getThinkingLevelMap(item) {
 /**
  * @param {string} value
  */
-function parseContextWindow(value) {
+export function parseContextWindow(value) {
   const match = /^(\d+(?:\.\d+)?)([km])$/i.exec(String(value || "").trim());
   if (!match) return undefined;
   const amount = Number(match[1]);
   const unit = match[2]?.toLowerCase();
   if (!Number.isFinite(amount)) return undefined;
   return Math.round(amount * (unit === "m" ? 1000000 : 1000));
+}
+
+/**
+ * @param {string} modelId catalog / pi base id
+ * @param {string | undefined} context catalog `context` value (`200k`, `1m`, …)
+ */
+export function resolveContextWindow(modelId, context) {
+  const fromParam = context ? parseContextWindow(context) : undefined;
+  if (fromParam) return fromParam;
+  const id = typeof modelId === "string" ? modelId : "";
+  return KNOWN_CONTEXT_WINDOWS[id] ?? FALLBACK_CONTEXT_WINDOW;
 }
 
 /**
@@ -287,8 +310,7 @@ export function registerModelItems(items) {
         if (used.has(piModelId)) continue;
         used.add(piModelId);
         const thinkingLevelMap = getThinkingLevelMap(item);
-        const contextWindow =
-          (context ? parseContextWindow(context) : undefined) ?? FALLBACK_CONTEXT_WINDOW;
+        const contextWindow = resolveContextWindow(item.id, context);
         const entry = {
           piModelId,
           baseModelId: item.id,

@@ -49,6 +49,12 @@ import {
 } from "./model-discovery.js";
 import { installGenerationSpeedFooter } from "./generation-speed.js";
 import { installMcpAutoRefresh } from "./mcp-auto-refresh.js";
+import {
+  createLocalStream,
+  isSummarizationRequest,
+  lastUserText,
+  runSummarizationViaBridge,
+} from "./compaction.js";
 
 /** @type {import('./types.js').ExtensionAPI | null} */
 let _piRef = null;
@@ -93,59 +99,6 @@ async function ensureCursorRemoteSession(ctx) {
   if (cur && next.length) {
     resolveModelOrFallback(cur, next);
   }
-}
-
-function lastUserText(context) {
-  const messages = context?.messages || [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.role === "user") {
-      if (typeof m.content === "string") return m.content;
-      if (Array.isArray(m.content)) {
-        return m.content
-          .filter((b) => b?.type === "text" && typeof b.text === "string")
-          .map((b) => b.text)
-          .join("\n");
-      }
-    }
-  }
-  return "";
-}
-
-/**
- * Minimal AssistantMessageEventStream stand-in (no pi-ai import).
- */
-function createLocalStream() {
-  const queue = [];
-  let ended = false;
-  let wake = null;
-  return {
-    push(ev) {
-      queue.push(ev);
-      if (wake) {
-        const w = wake;
-        wake = null;
-        w();
-      }
-    },
-    end() {
-      ended = true;
-      if (wake) {
-        const w = wake;
-        wake = null;
-        w();
-      }
-    },
-    async *[Symbol.asyncIterator]() {
-      for (;;) {
-        while (queue.length) yield queue.shift();
-        if (ended) return;
-        await new Promise((r) => {
-          wake = r;
-        });
-      }
-    },
-  };
 }
 
 function createProviderConfig(models) {
@@ -203,6 +156,25 @@ function streamSimple(model, context, options) {
   const stream = createLocalStream();
   (async () => {
     try {
+      if (isSummarizationRequest(options)) {
+        try {
+          await ensureCursorRemoteSession({
+            sessionManager: context?.sessionManager,
+            ui: context?.ui,
+            model,
+          });
+        } catch (err) {
+          throw err instanceof Error ? err : new Error(String(err));
+        }
+        await runSummarizationViaBridge({
+          model,
+          context,
+          options,
+          stream,
+          client: _bridgeClient,
+        });
+        return;
+      }
       if (_piRef && typeof _piRef.setActiveTools === "function") {
         const shadow = displayToolNames();
         const cur = _piRef.getActiveTools?.() || [];
@@ -578,6 +550,13 @@ export {
   handshakeWorkspaceCwd,
   resolveWorkspaceCwd,
 };
+export {
+  createLocalStream,
+  isSummarizationRequest,
+  lastUserText,
+  runSummarizationViaBridge,
+  summarizationPromptFromContext,
+} from "./compaction.js";
 export {
   formatToolArgs,
   formatToolResult,

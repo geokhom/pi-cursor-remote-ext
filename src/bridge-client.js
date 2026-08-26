@@ -160,6 +160,9 @@ export class BridgeClient {
     } else if (opts.model && typeof opts.model === "object" && opts.model.id) {
       payload.model = opts.model;
     }
+    if (opts.mode === "summarize") {
+      payload.mode = "summarize";
+    }
     const body = JSON.stringify(payload);
     const res = await this._request("POST", "/prompt", body, {
       "Content-Type": "application/json",
@@ -631,6 +634,8 @@ export function emptyUsage() {
  *   thinkingDisplay?: "off"|"indicator"|"full",
  *   wireStats?: "session"|"request",
  *   onThinkingIndicator?: (active: boolean) => void,
+ *   mode?: "summarize",
+ *   rejectTools?: boolean,
  * }} [opts]
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
@@ -657,6 +662,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     model:
       opts.modelSelection ||
       (typeof model.id === "string" ? model.id : undefined),
+    mode: opts.mode,
   });
 
   const result = await drainLiveRunTurn({
@@ -1017,6 +1023,9 @@ async function drainLiveRunTurn(opts = {}) {
         appendText((textBuf.endsWith("\n") ? "" : "\n") + ev.text);
       }
     } else if (ev.type === "tool_call") {
+      if (opts.rejectTools) {
+        throw new Error("Summarization attempted to call a tool");
+      }
       const wireName = typeof ev.name === "string" ? ev.name : "tool";
       const callId = typeof ev.call_id === "string" ? ev.call_id : "";
       const args =
