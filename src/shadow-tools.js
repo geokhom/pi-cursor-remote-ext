@@ -15,6 +15,7 @@ import {
   hasActiveLiveRun,
   layoutToolPanelLines,
 } from "./bridge-client.js";
+import { truncateToWidth } from "./tui-width.js";
 import { MODEL_VALUE_SET } from "./config.js";
 
 /** Loose JSON Schema — accepted by pi's typebox/json validator path. */
@@ -27,56 +28,8 @@ const ANY_OBJECT = {
 /** Match stock pi bash preview (last N lines + expand hint). */
 const TOOL_PREVIEW_LINES = 5;
 
-/** CSI / OSC / simple ANSI — stripped for visible width only. */
-const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
-
 /** @type {Set<string>} */
 const _registeredShadows = new Set();
-
-
-/**
- * Visible column width (ANSI ignored; code points ≈ 1 column — enough for shell).
- * @param {string} text
- */
-export function visibleWidth(text) {
-  if (!text) return 0;
-  return [...String(text).replace(ANSI_RE, "")].length;
-}
-
-/**
- * Truncate to max visible columns, preserving leading ANSI where possible.
- * @param {string} text
- * @param {number} maxWidth
- * @param {string} [ellipsis]
- */
-export function truncateToWidth(text, maxWidth, ellipsis = "…") {
-  // Newlines must not survive: one render() entry = one TUI row.
-  const s = String(text ?? "").replace(/[\r\n]/g, "");
-  if (!(maxWidth > 0)) return "";
-  if (visibleWidth(s) <= maxWidth) return s;
-  const ellW = visibleWidth(ellipsis);
-  const budget = Math.max(0, maxWidth - ellW);
-  let out = "";
-  let w = 0;
-  let i = 0;
-  while (i < s.length) {
-    if (s[i] === "\u001b") {
-      ANSI_RE.lastIndex = i;
-      const m = ANSI_RE.exec(s);
-      if (m && m.index === i) {
-        out += m[0];
-        i += m[0].length;
-        continue;
-      }
-    }
-    const cp = String.fromCodePoint(s.codePointAt(i));
-    if (w + 1 > budget) break;
-    out += cp;
-    w += 1;
-    i += cp.length;
-  }
-  return out + ellipsis;
-}
 
 /**
  * Last-N physical lines (stock bash uses visual wrap; good enough without pi-tui).
@@ -84,7 +37,7 @@ export function truncateToWidth(text, maxWidth, ellipsis = "…") {
  * @param {number} maxLines
  */
 export function truncateToLastLines(text, maxLines) {
-  const lines = String(text ?? "").split("\n");
+  const lines = String(text ?? "").split(/\r\n|\n|\r/);
   if (lines.length <= maxLines) {
     return { lines, skipped: 0 };
   }
@@ -115,7 +68,8 @@ function panelLinesComponent(linesOrFn, style = {}) {
             ? style.theme.fg(style.color, style.theme.bold(row))
             : style.theme.fg(style.color, row);
         }
-        return visibleWidth(styled) > w ? truncateToWidth(styled, w) : styled;
+        // Always clip: wrap can still under-count vs pi-tui wcwidth.
+        return truncateToWidth(styled, w);
       });
     },
     invalidate() {},
@@ -314,3 +268,4 @@ export function registerShadowTools(pi) {
 }
 
 export { displayToolName, setMcpWireTools, shadowToolNames };
+export { truncateToWidth, visibleWidth } from "./tui-width.js";

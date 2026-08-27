@@ -26,6 +26,7 @@ import {
   clearWireStatus,
 } from "./thinking-indicator.js";
 import { tryApplyWireUsage } from "./usage-accounting.js";
+import { wrapToWidth, LINE_BREAK_RE } from "./tui-width.js";
 import {
   clearLiveRun,
   getActiveLiveRun,
@@ -627,29 +628,7 @@ export function unwrapToolArgs(args) {
   return o;
 }
 
-/**
- * Split text into width-sized chunks (code points ≈ columns).
- * Embedded newlines become extra rows — never kept inside a chunk
- * (pi TUI height is `render().length`; a `\n` inside one row paints extra
- * terminal lines without background).
- * @param {string} text
- * @param {number} width
- * @returns {string[]}
- */
-export function wrapToWidth(text, width) {
-  const s = String(text ?? "");
-  if (s.includes("\n") || s.includes("\r")) {
-    return s.split(/\r?\n/).flatMap((part) => wrapToWidth(part, width));
-  }
-  if (!(width > 0)) return [s];
-  const chars = [...s];
-  if (!chars.length) return [""];
-  const out = [];
-  for (let i = 0; i < chars.length; i += width) {
-    out.push(chars.slice(i, i + width).join(""));
-  }
-  return out;
-}
+export { wrapToWidth };
 
 /**
  * Map logical tool-panel lines → TUI rows: one array entry per painted row.
@@ -664,7 +643,7 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   /** @type {string[]} */
   const logical = [];
   for (const item of src) {
-    for (const part of String(item ?? "").split(/\r?\n/)) {
+    for (const part of String(item ?? "").split(LINE_BREAK_RE)) {
       logical.push(part);
     }
   }
@@ -682,7 +661,9 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   const maxLines = opts.maxLines;
   if (maxLines && physical.length > maxLines) {
     const skipped = physical.length - maxLines;
-    return [...physical.slice(0, maxLines), `… (${skipped} more lines)`];
+    const hint = `… (${skipped} more lines)`;
+    const extra = w > 0 ? wrapToWidth(hint, w) : [hint];
+    return [...physical.slice(0, maxLines), ...extra];
   }
   return physical;
 }
@@ -743,24 +724,24 @@ export function formatToolCallLines(displayName, args, opts = {}) {
   /** @type {string[]} */
   let logical = [];
   if (typeof o.command === "string") {
-    const parts = o.command.split(/\r?\n/);
+    const parts = o.command.split(LINE_BREAK_RE);
     logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
   } else if (typeof o.path === "string" && typeof o.old_string === "string") {
     const neu = typeof o.new_string === "string" ? o.new_string : "";
-    const oldLines = o.old_string.split(/\r?\n/);
-    const newLines = neu.split(/\r?\n/);
+    const oldLines = o.old_string.split(LINE_BREAK_RE);
+    const newLines = neu.split(LINE_BREAK_RE);
     logical = [
       `${prefix}${o.path}`,
       ...oldLines.map((p, i) => (i === 0 ? `- ${p}` : p)),
       ...newLines.map((p, i) => (i === 0 ? `+ ${p}` : p)),
     ];
   } else if (typeof o.path === "string" && typeof o.content === "string") {
-    logical = [`${prefix}${o.path}`, ...o.content.split(/\r?\n/)];
+    logical = [`${prefix}${o.path}`, ...o.content.split(LINE_BREAK_RE)];
   } else {
     const raw = formatToolArgs(args);
     if (!raw) logical = [`$ ${displayName}`];
     else {
-      const parts = String(raw).split(/\r?\n/);
+      const parts = String(raw).split(LINE_BREAK_RE);
       logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
     }
   }

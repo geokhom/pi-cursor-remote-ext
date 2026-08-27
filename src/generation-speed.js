@@ -7,51 +7,9 @@
  * Shown on the stock-style stats line immediately before the context %/window.
  */
 
+import { truncateToWidth, visibleWidth } from "./tui-width.js";
+
 const STATE_KEY = Symbol.for("pi-cursor-remote.generation-speed.v1");
-
-const ANSI_RE =
-  /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
-
-/**
- * @param {string} text
- */
-function visibleWidth(text) {
-  if (!text) return 0;
-  return [...String(text).replace(ANSI_RE, "")].length;
-}
-
-/**
- * @param {string} text
- * @param {number} maxWidth
- * @param {string} [ellipsis]
- */
-function truncateToWidth(text, maxWidth, ellipsis = "…") {
-  const s = String(text ?? "");
-  if (!(maxWidth > 0)) return "";
-  if (visibleWidth(s) <= maxWidth) return s;
-  const ellW = visibleWidth(ellipsis);
-  const budget = Math.max(0, maxWidth - ellW);
-  let out = "";
-  let w = 0;
-  let i = 0;
-  while (i < s.length) {
-    if (s[i] === "\u001b") {
-      ANSI_RE.lastIndex = i;
-      const m = ANSI_RE.exec(s);
-      if (m && m.index === i) {
-        out += m[0];
-        i += m[0].length;
-        continue;
-      }
-    }
-    const cp = String.fromCodePoint(s.codePointAt(i));
-    if (w + 1 > budget) break;
-    out += cp;
-    w += 1;
-    i += cp.length;
-  }
-  return out + ellipsis;
-}
 
 /**
  * @returns {{
