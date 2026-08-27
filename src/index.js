@@ -559,8 +559,13 @@ export {
 } from "./compaction.js";
 export {
   formatToolArgs,
+  formatToolCallLines,
   formatToolResult,
+  layoutToolPanelLines,
+  unwrapToolArgs,
+  wrapToWidth,
   joinThinkingChunk,
+  thinkingJoinNeedsSpace,
   assertUnixSocketSafe,
 } from "./bridge-client.js";
 export { displayToolName } from "./tool-display.js";

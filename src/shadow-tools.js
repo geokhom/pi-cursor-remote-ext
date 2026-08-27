@@ -9,7 +9,12 @@
 
 import { displayToolNames, displayToolName, setMcpWireTools } from "./tool-display.js";
 import { takeToolResult, hasFollowUpText } from "./result-stash.js";
-import { formatToolArgs, formatToolResult, hasActiveLiveRun } from "./bridge-client.js";
+import {
+  formatToolCallLines,
+  formatToolResult,
+  hasActiveLiveRun,
+  layoutToolPanelLines,
+} from "./bridge-client.js";
 import { MODEL_VALUE_SET } from "./config.js";
 
 /** Loose JSON Schema — accepted by pi's typebox/json validator path. */
@@ -45,7 +50,8 @@ export function visibleWidth(text) {
  * @param {string} [ellipsis]
  */
 export function truncateToWidth(text, maxWidth, ellipsis = "…") {
-  const s = String(text ?? "");
+  // Newlines must not survive: one render() entry = one TUI row.
+  const s = String(text ?? "").replace(/[\r\n]/g, "");
   if (!(maxWidth > 0)) return "";
   if (visibleWidth(s) <= maxWidth) return s;
   const ellW = visibleWidth(ellipsis);
@@ -89,16 +95,28 @@ export function truncateToLastLines(text, maxLines) {
 }
 
 /**
- * Minimal pi-tui Component — truncates every line to render(width).
- * @param {string[] | (() => string[])} linesOrFn
+ * Paint logical lines as TUI rows. Height = array length (newlines already split).
+ * Empty rows are a space so the Box background does not tear.
+ * @param {string[] | ((width: number) => string[])} linesOrFn
+ * @param {{ theme?: { fg: (name: string, text: string) => string, bold: (text: string) => string }, color?: string, bold?: boolean, maxLines?: number }} [style]
  */
-function linesComponent(linesOrFn) {
+function panelLinesComponent(linesOrFn, style = {}) {
   return {
     render(width) {
       const w = typeof width === "number" && width > 0 ? width : 80;
-      const raw = typeof linesOrFn === "function" ? linesOrFn() : linesOrFn;
-      const lines = raw && raw.length ? raw : [""];
-      return lines.map((line) => truncateToWidth(line, w));
+      const raw = typeof linesOrFn === "function" ? linesOrFn(w) : linesOrFn;
+      const rows = layoutToolPanelLines(raw && raw.length ? raw : [""], w, {
+        maxLines: style.maxLines,
+      });
+      return rows.map((row) => {
+        let styled = row;
+        if (style.theme && style.color) {
+          styled = style.bold
+            ? style.theme.fg(style.color, style.theme.bold(row))
+            : style.theme.fg(style.color, row);
+        }
+        return visibleWidth(styled) > w ? truncateToWidth(styled, w) : styled;
+      });
     },
     invalidate() {},
   };
@@ -124,37 +142,34 @@ function makeShadowTool(displayName) {
     parameters: ANY_OBJECT,
     executionMode: "parallel",
     renderCall(args, theme) {
-      const argLine = formatToolArgs(args);
-      const title =
-        displayName === "shell" && argLine
-          ? `$ ${argLine}`
-          : argLine
-            ? `$ ${displayName} ${argLine}`
-            : `$ ${displayName}`;
-      return linesComponent([theme.fg("toolTitle", theme.bold(title))]);
+      return panelLinesComponent(
+        (width) => formatToolCallLines(displayName, args, { width }),
+        { theme, color: "toolTitle", bold: true }
+      );
     },
     renderResult(result, options, theme) {
       const text = (result?.content || [])
         .filter((c) => c && c.type === "text" && typeof c.text === "string")
         .map((c) => c.text)
         .join("\n");
-      if (!text) return linesComponent([]);
+      if (!text) return panelLinesComponent([""]);
       const color = result?.isError ? "error" : "toolOutput";
       const expanded = Boolean(options?.expanded);
       if (expanded) {
-        const lines = text.split("\n").map((l) => theme.fg(color, l));
-        return linesComponent(lines);
+        return panelLinesComponent(text.split(/\r?\n/), {
+          theme,
+          color,
+          maxLines: 80,
+        });
       }
       const { lines: preview, skipped } = truncateToLastLines(text, TOOL_PREVIEW_LINES);
-      const styled = preview.map((l) => theme.fg(color, l));
       if (skipped > 0) {
-        const hint = theme.fg(
-          "muted",
-          `... (${skipped} earlier lines, Ctrl+O to expand)`
+        return panelLinesComponent(
+          [`... (${skipped} earlier lines, Ctrl+O to expand)`, ...preview],
+          { theme, color }
         );
-        return linesComponent(["", hint, ...styled]);
       }
-      return linesComponent(styled.length ? ["", ...styled] : []);
+      return panelLinesComponent(["", ...preview], { theme, color });
     },
     async execute(toolCallId, _params, _signal, onUpdate, _ctx) {
       const stashed = takeToolResult(toolCallId, displayName);

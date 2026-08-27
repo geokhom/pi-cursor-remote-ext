@@ -37,7 +37,50 @@ import {
 import { recordDecodeSample } from "./generation-speed.js";
 
 /**
+ * True when a thinking-chunk boundary needs an inserted space.
+ * Keeps dotted ASCII identifiers (`zbx.t_foo`) and `foo(` tight.
+ * @param {string} left
+ * @param {string} right
+ */
+export function thinkingJoinNeedsSpace(left, right) {
+  if (!left || !right) return false;
+  if (/\s$/.test(left) || /^\s/.test(right)) return false;
+  if (/^[,.;:!?%)\]}…»]/.test(right)) return false;
+  if (/^\(/.test(right)) return false;
+  if (/[(\[{]$/.test(left)) return false;
+  if (/_$/.test(left) || /^_/.test(right)) return false;
+  // Dotted ident continuation (zbx.t_foo); still space before a new sentence (Message. Verifying).
+  if (/\.$/.test(left) && /^[a-z0-9_]/.test(right)) return false;
+  return (
+    /[\p{L}\p{N}.,:;!?%…»"'\)\]—–/-]$/u.test(left) &&
+    /^[\p{L}\p{N}«"'`—–/-]/u.test(right)
+  );
+}
+
+/**
+ * @param {string} buf
+ * @param {string} suffix
+ */
+function joinThinkingBoundary(buf, suffix) {
+  if (!suffix) return buf;
+  const rest = suffix.replace(/^[ \t]+/, "");
+  if (!rest) {
+    if (/\s$/.test(buf)) return buf;
+    return `${buf} `;
+  }
+  if (/^[ \t]/.test(suffix)) {
+    if (/\s$/.test(buf)) return buf + rest;
+    return `${buf} ${rest}`;
+  }
+  if (/\s$/.test(buf)) return buf + rest;
+  if (thinkingJoinNeedsSpace(buf, rest)) return `${buf} ${rest}`;
+  return buf + rest;
+}
+
+/**
  * Join thinking chunks into flowing prose (SDK often sends short lines / CR).
+ * Incremental tokens, space-only chunks, and cumulative snapshots that omit
+ * a space at the new boundary (`rules` + `rulesс` → `rules с`) are glued here.
  * @param {string} buf
  * @param {string} chunk
  */
@@ -47,21 +90,16 @@ export function joinThinkingChunk(buf, chunk) {
   // Soft line wraps → spaces; keep rare blank-line paragraph breaks
   c = c.replace(/([^\n])\n(?!\n)/g, "$1 ").replace(/\n{3,}/g, "\n\n");
   c = c.replace(/[ \t]{2,}/g, " ");
-  if (!buf) return c.replace(/^\s+/, "");
-  const right = c.replace(/^\s+/, "");
-  if (!right) return buf;
-  // Cumulative snapshot or exact/replay duplicate (ignore tiny punctuation-only)
-  if (right.startsWith(buf)) return right;
-  if (right === buf || (right.length >= 4 && buf.endsWith(right))) return buf;
-  if (/\s$/.test(buf)) return buf + right;
-  // Letter/digit/punct boundary (Cyrillic + «»); insert space across chunks
-  if (
-    /[\p{L}\p{N}.!?)\]"'…»]$/u.test(buf) &&
-    /^[\p{L}\p{N}("'([`«]/u.test(right)
-  ) {
-    return `${buf} ${right}`;
+  if (!buf) return c.replace(/^[ \t]+/, "");
+  if (c.startsWith(buf)) {
+    return joinThinkingBoundary(buf, c.slice(buf.length));
   }
-  return buf + right;
+  const bufRtrim = buf.replace(/[ \t]+$/, "");
+  if (bufRtrim && bufRtrim !== buf && c.startsWith(bufRtrim)) {
+    return joinThinkingBoundary(bufRtrim, c.slice(bufRtrim.length));
+  }
+  if (c === buf || (c.length >= 4 && buf.endsWith(c))) return buf;
+  return joinThinkingBoundary(buf, c);
 }
 
 /**
@@ -528,15 +566,127 @@ export async function applyEnvGrants(client, env = process.env) {
   return Array.isArray(res.grants) ? res.grants : wanted;
 }
 
+/** Max physical TUI lines for a tool_call header (then a "more" hint). */
+export const TOOL_CALL_PREVIEW_LINES = 12;
+
 /**
- * Format contour tool args for TUI (single line when short).
+ * Unwrap SDK/MCP envelopes `{toolName, args:{…}}` without touching string whitespace.
+ * @param {unknown} args
+ * @returns {Record<string, unknown>}
+ */
+export function unwrapToolArgs(args) {
+  let obj = args;
+  if (obj == null) return {};
+  if (typeof obj === "string") {
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return {};
+    }
+  }
+  if (typeof obj !== "object" || Array.isArray(obj)) return {};
+  const o = /** @type {Record<string, unknown>} */ (obj);
+  const nested = o.args;
+  const wrapper =
+    "toolName" in o ||
+    "tool_name" in o ||
+    o.providerIdentifier === "custom-user-tools" ||
+    o.provider_identifier === "custom-user-tools";
+  if (wrapper && nested && typeof nested === "object" && !Array.isArray(nested)) {
+    return /** @type {Record<string, unknown>} */ (nested);
+  }
+  if (wrapper && typeof nested === "string") {
+    try {
+      const parsed = JSON.parse(nested);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return /** @type {Record<string, unknown>} */ (parsed);
+      }
+    } catch {
+      return o;
+    }
+  }
+  return o;
+}
+
+/**
+ * Split text into width-sized chunks (code points ≈ columns).
+ * Embedded newlines become extra rows — never kept inside a chunk
+ * (pi TUI height is `render().length`; a `\n` inside one row paints extra
+ * terminal lines without background).
+ * @param {string} text
+ * @param {number} width
+ * @returns {string[]}
+ */
+export function wrapToWidth(text, width) {
+  const s = String(text ?? "");
+  if (s.includes("\n") || s.includes("\r")) {
+    return s.split(/\r?\n/).flatMap((part) => wrapToWidth(part, width));
+  }
+  if (!(width > 0)) return [s];
+  const chars = [...s];
+  if (!chars.length) return [""];
+  const out = [];
+  for (let i = 0; i < chars.length; i += width) {
+    out.push(chars.slice(i, i + width).join(""));
+  }
+  return out;
+}
+
+/**
+ * Map logical tool-panel lines → TUI rows: one array entry per painted row.
+ * Empty heredoc lines become a single space so Box can fill toolSuccessBg.
+ * @param {string | string[]} lines
+ * @param {number} [width]
+ * @param {{ maxLines?: number }} [opts]
+ * @returns {string[]}
+ */
+export function layoutToolPanelLines(lines, width = 0, opts = {}) {
+  const src = Array.isArray(lines) ? lines : [lines];
+  /** @type {string[]} */
+  const logical = [];
+  for (const item of src) {
+    for (const part of String(item ?? "").split(/\r?\n/)) {
+      logical.push(part);
+    }
+  }
+  const w = typeof width === "number" && width > 0 ? width : 0;
+  /** @type {string[]} */
+  const physical = [];
+  for (const line of logical) {
+    const chunks = w > 0 ? wrapToWidth(line, w) : [line];
+    for (const chunk of chunks) {
+      const clean = String(chunk).replace(/[\r\n]/g, "");
+      physical.push(clean.length ? clean : " ");
+    }
+  }
+  if (!physical.length) physical.push(" ");
+  const maxLines = opts.maxLines;
+  if (maxLines && physical.length > maxLines) {
+    const skipped = physical.length - maxLines;
+    return [...physical.slice(0, maxLines), `… (${skipped} more lines)`];
+  }
+  return physical;
+}
+
+/**
+ * Format contour tool args for TUI (keep newlines; unwrap MCP envelopes).
  * @param {unknown} args
  */
 export function formatToolArgs(args) {
   if (args == null) return "";
   if (typeof args === "string") return args;
   if (typeof args !== "object") return String(args);
-  const o = /** @type {Record<string, unknown>} */ (args);
+  const o = Array.isArray(args)
+    ? /** @type {Record<string, unknown>} */ ({})
+    : unwrapToolArgs(args);
+  if (Array.isArray(args)) {
+    try {
+      const s = JSON.stringify(args);
+      return s.length > 240 ? s.slice(0, 240) + "…" : s;
+    } catch {
+      return "";
+    }
+  }
   // contour__shell — show command like local bash UI
   if (typeof o.command === "string" && Object.keys(o).length <= 3) {
     return o.command;
@@ -545,11 +695,44 @@ export function formatToolArgs(args) {
     return o.path;
   }
   try {
-    const s = JSON.stringify(args);
+    const s = JSON.stringify(o);
     return s.length > 240 ? s.slice(0, 240) + "…" : s;
   } catch {
     return "";
   }
+}
+
+/**
+ * Multi-line tool_call header for pi TUI (sed scripts, write_file body).
+ * Pass `width` from render() so long one-liners wrap instead of ending in `…`.
+ * @param {string} displayName
+ * @param {unknown} args
+ * @param {{ maxLines?: number, width?: number }} [opts]
+ * @returns {string[]}
+ */
+export function formatToolCallLines(displayName, args, opts = {}) {
+  const maxLines = opts.maxLines ?? TOOL_CALL_PREVIEW_LINES;
+  const width = opts.width;
+  const o = unwrapToolArgs(args);
+  const shell = displayName === "shell";
+  const prefix = shell ? "$ " : `$ ${displayName} `;
+  /** @type {string[]} */
+  let logical = [];
+  if (typeof o.command === "string") {
+    const parts = o.command.split(/\r?\n/);
+    logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
+  } else if (typeof o.path === "string" && typeof o.content === "string") {
+    logical = [`${prefix}${o.path}`, ...o.content.split(/\r?\n/)];
+  } else {
+    const raw = formatToolArgs(args);
+    if (!raw) logical = [`$ ${displayName}`];
+    else {
+      const parts = String(raw).split(/\r?\n/);
+      logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
+    }
+  }
+  if (!logical.length) logical.push(`$ ${displayName}`);
+  return layoutToolPanelLines(logical, width, { maxLines });
 }
 
 /**
