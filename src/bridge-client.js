@@ -745,6 +745,15 @@ export function formatToolCallLines(displayName, args, opts = {}) {
   if (typeof o.command === "string") {
     const parts = o.command.split(/\r?\n/);
     logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
+  } else if (typeof o.path === "string" && typeof o.old_string === "string") {
+    const neu = typeof o.new_string === "string" ? o.new_string : "";
+    const oldLines = o.old_string.split(/\r?\n/);
+    const newLines = neu.split(/\r?\n/);
+    logical = [
+      `${prefix}${o.path}`,
+      ...oldLines.map((p, i) => (i === 0 ? `- ${p}` : p)),
+      ...newLines.map((p, i) => (i === 0 ? `+ ${p}` : p)),
+    ];
   } else if (typeof o.path === "string" && typeof o.content === "string") {
     logical = [`${prefix}${o.path}`, ...o.content.split(/\r?\n/)];
   } else {
@@ -1287,7 +1296,7 @@ async function drainLiveRunTurn(opts = {}) {
         output.errorMessage = hint
           ? `policy: ${hint}`
           : `policy: blocked tool "${tn}" — use only contour__* tools ` +
-            "(list_dir/read_file/write_file/mkdir/delete_path/shell/ping)";
+            "(list_dir/read_file/write_file/str_replace/mkdir/delete_path/shell/ping)";
       } else if (kind === "cancelled") {
         appendStatusLine("[cancel] VPS confirmed — run stopped");
         output.stopReason = "aborted";

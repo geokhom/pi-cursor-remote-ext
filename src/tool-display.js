@@ -13,6 +13,7 @@ export const CONTOUR_WIRE_TOOLS = Object.freeze([
   "contour__read_file",
   "contour__grep",
   "contour__write_file",
+  "contour__str_replace",
   "contour__mkdir",
   "contour__delete_path",
   "contour__shell",
