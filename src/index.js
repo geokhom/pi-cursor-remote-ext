@@ -535,6 +535,37 @@ export default async function register(pi) {
         }
       },
     });
+    const cancelRun = async (_args, ctx) => {
+      if (!client) {
+        ctx?.ui?.notify?.("Bridge not configured; cannot cancel.", "warning");
+        return;
+      }
+      try {
+        const json = await client.cancel();
+        if (json.uplink || json.cancelled) {
+          ctx?.ui?.notify?.("Cursor run cancelled.", "info");
+        } else {
+          ctx?.ui?.notify?.("No in-flight Cursor run to cancel.", "info");
+        }
+      } catch (err) {
+        ctx?.ui?.notify?.(
+          `Cancel failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error"
+        );
+      }
+    };
+    pi.registerCommand("stop", {
+      description: "Stop the in-flight Cursor Agent run (same as ESC)",
+      handler: cancelRun,
+    });
+    pi.registerCommand("cancel", {
+      description: "Stop the in-flight Cursor Agent run (same as ESC / /stop)",
+      handler: cancelRun,
+    });
+    pi.registerCommand("cursor-remote-stop", {
+      description: "Stop the in-flight Cursor Agent run (same as ESC / /stop)",
+      handler: cancelRun,
+    });
   }
 }
 

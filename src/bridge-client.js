@@ -339,6 +339,25 @@ export class BridgeClient {
   }
 
   /**
+   * POST /cancel — stop the in-flight VPS run (ESC / /stop). Idempotent.
+   * @param {{ run_id?: string, request_id?: string }} [body]
+   */
+  async cancel(body = {}) {
+    const payload = JSON.stringify(body || {});
+    const res = await this._request("POST", "/cancel", payload, {
+      "Content-Type": "application/json",
+    });
+    if (res.statusCode !== 200) {
+      throw new Error(`cancel HTTP ${res.statusCode}: ${res.body}`);
+    }
+    const json = JSON.parse(res.body || "{}");
+    if (!json.ok) {
+      throw new Error(`cancel rejected: ${json.error || "unknown"}`);
+    }
+    return json;
+  }
+
+  /**
    * GET /events — async iterator of parsed SSE `data:` JSON objects.
    * @param {AbortSignal} [signal]
    */
@@ -1250,6 +1269,9 @@ async function drainLiveRunTurn(opts = {}) {
           ? `policy: ${hint}`
           : `policy: blocked tool "${tn}" — use only contour__* tools ` +
             "(list_dir/read_file/write_file/mkdir/delete_path/shell/ping)";
+      } else if (kind === "cancelled") {
+        output.stopReason = "aborted";
+        output.errorMessage = "cancelled";
       } else {
         output.errorMessage = ev.message ? `${kind}: ${ev.message}` : kind;
       }

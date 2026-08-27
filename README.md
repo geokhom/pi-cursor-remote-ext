@@ -78,4 +78,5 @@ Also needed: running bridge + `~/.pi/agent/cursor-remote.json` (see contour-brid
 ```bash
 ./run_bridge.sh   # or: python -m pi_cursor_local --from-config
 pi                # select model "Cursor Remote"
+# ESC or /stop / /cancel stops the Cursor run on the VPS (not only TUI output)
 ```

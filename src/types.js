@@ -12,6 +12,7 @@
  *
  * @typedef {object} ExtensionAPI
  * @property {(name: string, config: ProviderConfig) => void} registerProvider
+ * @property {(name: string, spec: { description?: string, handler: Function }) => void} [registerCommand]
  */
 
 export {};

@@ -93,6 +93,17 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
   const onAbort = () => abort.abort();
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
+  const onUserAbort = () => {
+    client.cancel().catch(() => {});
+  };
+  if (signal) {
+    if (signal.aborted) {
+      onUserAbort();
+    } else {
+      signal.addEventListener("abort", onUserAbort, { once: true });
+    }
+  }
+
   /** @type {LiveRunSession} */
   const session = {
     queue: [],
@@ -134,7 +145,10 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     },
     dispose() {
       clearTimeout(timer);
-      if (signal) signal.removeEventListener("abort", onAbort);
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+        signal.removeEventListener("abort", onUserAbort);
+      }
       try {
         abort.abort();
       } catch {
@@ -185,7 +199,10 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
       }
     } finally {
       clearTimeout(timer);
-      if (signal) signal.removeEventListener("abort", onAbort);
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+        signal.removeEventListener("abort", onUserAbort);
+      }
       session.closed = true;
       session.enqueue(null);
     }
