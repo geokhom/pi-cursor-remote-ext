@@ -7,7 +7,7 @@
  * "Rendered line N exceeds terminal width".
  */
 
-import { displayToolNames, displayToolName, setMcpWireTools } from "./tool-display.js";
+import { displayToolName, setMcpWireTools, shadowToolNames } from "./tool-display.js";
 import { takeToolResult, hasFollowUpText } from "./result-stash.js";
 import {
   formatToolCallLines,
@@ -207,7 +207,7 @@ function makeShadowTool(displayName) {
  * @param {unknown} model
  * @returns {boolean}
  */
-function isCursorRemoteModel(model) {
+export function isCursorRemoteModel(model) {
   const m = /** @type {{ provider?: string, api?: string, id?: string } | null} */ (model);
   return (
     m?.provider === "cursor-remote" ||
@@ -219,6 +219,17 @@ function isCursorRemoteModel(model) {
         m.id.includes("@") ||
         m.id.includes(":")))
   );
+}
+
+/**
+ * Keep shadows when the model is unknown (session_start race). Stripping on
+ * null caused "Tool shell not found" on the first prompt.
+ * @param {unknown} model
+ * @returns {boolean}
+ */
+export function shouldActivateShadows(model) {
+  if (model == null) return true;
+  return isCursorRemoteModel(model);
 }
 
 /**
@@ -238,7 +249,7 @@ export function registerShadowTools(pi) {
     _registeredShadows.add(name);
   };
 
-  for (const name of displayToolNames()) {
+  for (const name of shadowToolNames()) {
     ensureShadow(name);
   }
 
@@ -252,11 +263,11 @@ export function registerShadowTools(pi) {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
       return;
     }
-    const shadow = new Set(displayToolNames());
+    const shadow = new Set(shadowToolNames());
     for (const name of shadow) ensureShadow(name);
     const current = pi.getActiveTools() || [];
     const without = current.filter((n) => !shadow.has(n) && !_registeredShadows.has(n));
-    if (isCursorRemoteModel(model)) {
+    if (shouldActivateShadows(model)) {
       pi.setActiveTools([...without, ...shadow]);
     } else {
       pi.setActiveTools(without);
@@ -276,7 +287,7 @@ export function registerShadowTools(pi) {
         .map((t) => (t && typeof t.name === "string" ? t.name : null))
         .filter(Boolean);
       setMcpWireTools(wires);
-      for (const name of displayToolNames()) ensureShadow(name);
+      for (const name of shadowToolNames()) ensureShadow(name);
       syncActive(model);
       return snap;
     } catch {
@@ -302,4 +313,4 @@ export function registerShadowTools(pi) {
   return { syncActive, syncMcpShadows, ensureShadow };
 }
 
-export { displayToolName, setMcpWireTools };
+export { displayToolName, setMcpWireTools, shadowToolNames };

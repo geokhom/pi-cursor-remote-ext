@@ -36,7 +36,7 @@ import {
 } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
 import { takeFollowUp } from "./result-stash.js";
-import { displayToolNames } from "./tool-display.js";
+import { shadowToolNames } from "./tool-display.js";
 import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js";
 import {
   buildCursorModelSelection,
@@ -176,7 +176,7 @@ function streamSimple(model, context, options) {
         return;
       }
       if (_piRef && typeof _piRef.setActiveTools === "function") {
-        const shadow = displayToolNames();
+        const shadow = shadowToolNames();
         const cur = _piRef.getActiveTools?.() || [];
         const merged = [...new Set([...cur.filter((n) => !shadow.includes(n)), ...shadow])];
         _piRef.setActiveTools(merged);
@@ -404,6 +404,7 @@ export default async function register(pi) {
     pi.on("session_start", async (event, ctx) => {
       captureUi(event, ctx);
       _lastModel = ctx?.model || event?.model || _lastModel;
+      shadowApi?.syncActive?.(_lastModel);
       if (ctx?.ui) lastUi = ctx.ui;
       installGenerationSpeedFooter(ctx);
       if (!client) return;
@@ -466,6 +467,7 @@ export default async function register(pi) {
     pi.on("before_agent_start", async (event, ctx) => {
       captureUi(event, ctx);
       _lastModel = ctx?.model || _lastModel;
+      shadowApi?.syncActive?.(_lastModel);
       if (ctx?.ui) lastUi = ctx.ui;
       if (client) {
         try {
@@ -478,6 +480,7 @@ export default async function register(pi) {
     pi.on("model_select", (_event, ctx) => {
       captureUi(_event, ctx);
       _lastModel = ctx?.model || _lastModel;
+      shadowApi?.syncActive?.(_lastModel);
       if (ctx?.ui) lastUi = ctx.ui;
     });
   }

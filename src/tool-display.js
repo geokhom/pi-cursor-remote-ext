@@ -22,6 +22,15 @@ export const CONTOUR_WIRE_TOOLS = Object.freeze([
 /** @type {string[]} */
 let _mcpWireTools = [];
 
+/** Cursor built-in names → shadow display names (Pi execute lookup). */
+export const BUILTIN_SHADOW_ALIASES = Object.freeze({
+  Shell: "shell",
+  Read: "read_file",
+  Grep: "grep",
+  Write: "write_file",
+  Delete: "delete_path",
+});
+
 /**
  * @param {string} wireName
  * @returns {string}
@@ -49,6 +58,19 @@ export function displayToolNames() {
   const core = CONTOUR_WIRE_TOOLS.map(displayToolName);
   const mcp = _mcpWireTools.map(displayToolName);
   return [...new Set([...core, ...mcp])];
+}
+
+/**
+ * All names Pi may look up after a Cursor Remote tool_use (display, wire, aliases).
+ * Missing any of these → "Tool shell not found".
+ * @returns {string[]}
+ */
+export function shadowToolNames() {
+  const names = new Set(displayToolNames());
+  for (const w of CONTOUR_WIRE_TOOLS) names.add(w);
+  for (const w of _mcpWireTools) names.add(w);
+  for (const alias of Object.keys(BUILTIN_SHADOW_ALIASES)) names.add(alias);
+  return [...names];
 }
 
 /**
