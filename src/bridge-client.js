@@ -710,6 +710,11 @@ export function formatToolArgs(args) {
   if (typeof o.command === "string" && Object.keys(o).length <= 3) {
     return o.command;
   }
+  // contour__grep — pattern [path]
+  if (typeof o.pattern === "string") {
+    const extra = typeof o.path === "string" && o.path ? ` ${o.path}` : "";
+    return o.pattern + extra;
+  }
   if (typeof o.path === "string" && Object.keys(o).length <= 3) {
     return o.path;
   }
