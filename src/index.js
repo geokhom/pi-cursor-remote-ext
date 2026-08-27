@@ -542,8 +542,13 @@ export default async function register(pi) {
       }
       try {
         const json = await client.cancel();
-        if (json.uplink || json.cancelled) {
-          ctx?.ui?.notify?.("Cursor run cancelled.", "info");
+        if (json.uplink) {
+          ctx?.ui?.notify?.(
+            "cancel sent to VPS — wait for “[cancel] VPS confirmed” in the turn.",
+            "info"
+          );
+        } else if (json.cancelled) {
+          ctx?.ui?.notify?.("Queued prompts dropped (no in-flight run).", "info");
         } else {
           ctx?.ui?.notify?.("No in-flight Cursor run to cancel.", "info");
         }

@@ -913,6 +913,14 @@ async function drainLiveRunTurn(opts = {}) {
     throw new Error("no active bridge live run");
   }
 
+  const onResumeAbort = () => {
+    if (typeof session.requestCancel === "function") session.requestCancel();
+  };
+  if (opts.signal) {
+    if (opts.signal.aborted) onResumeAbort();
+    else opts.signal.addEventListener("abort", onResumeAbort, { once: true });
+  }
+
   const thinkingDisplay = coerceThinkingDisplay(
     opts.thinkingDisplay ?? THINKING_DISPLAY_DEFAULT
   );
@@ -1113,6 +1121,12 @@ async function drainLiveRunTurn(opts = {}) {
     });
   };
 
+  /** Visible cancel / service lines in the assistant transcript. */
+  const appendStatusLine = (line) => {
+    const chunk = `${textBuf && !textBuf.endsWith("\n") ? "\n" : ""}${line}\n`;
+    appendText(chunk);
+  };
+
   /**
    * @param {string} wireName
    * @param {string} callId
@@ -1270,10 +1284,20 @@ async function drainLiveRunTurn(opts = {}) {
           : `policy: blocked tool "${tn}" — use only contour__* tools ` +
             "(list_dir/read_file/write_file/mkdir/delete_path/shell/ping)";
       } else if (kind === "cancelled") {
+        appendStatusLine("[cancel] VPS confirmed — run stopped");
         output.stopReason = "aborted";
-        output.errorMessage = "cancelled";
+        output.errorMessage = "cancelled (VPS confirmed)";
       } else {
         output.errorMessage = ev.message ? `${kind}: ${ev.message}` : kind;
+      }
+    } else if (ev.type === "cancel_ack") {
+      const phase = ev.phase || "";
+      if (phase === "uplink_ok" || ev.uplink) {
+        appendStatusLine("[cancel] sent to VPS");
+      } else if (phase === "uplink_failed") {
+        appendStatusLine(`[cancel] uplink failed (${ev.error || "error"})`);
+      } else if (phase === "sent") {
+        appendStatusLine("[cancel] sending…");
       }
     } else if (ev.type === "session_end") {
       endThinkingBlock();
@@ -1305,7 +1329,13 @@ async function drainLiveRunTurn(opts = {}) {
 
       // Tool batch already emitted: post-tool thinking/text belong on the next turn.
       // If tool_executed is still pending (run_finished race), buffer until stash is ready.
-      if (toolsThisTurn > 0 && isPostToolBoundaryEvent(ev)) {
+      // Terminals (cancel / session_end) must not wait — local tools may never finish.
+      if (
+        toolsThisTurn > 0 &&
+        isPostToolBoundaryEvent(ev) &&
+        ev.type !== "run_error" &&
+        ev.type !== "session_end"
+      ) {
         if (pendingExec.size > 0) {
           deferredBoundary.push(ev);
           continue;
@@ -1363,6 +1393,8 @@ async function drainLiveRunTurn(opts = {}) {
       output.errorMessage = err instanceof Error ? err.message : String(err);
       finishTurn("error");
     }
+  } finally {
+    if (opts.signal) opts.signal.removeEventListener("abort", onResumeAbort);
   }
 
   return {

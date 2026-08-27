@@ -90,19 +90,8 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
 
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), timeoutMs);
-  const onAbort = () => abort.abort();
-  if (signal) signal.addEventListener("abort", onAbort, { once: true });
-
-  const onUserAbort = () => {
-    client.cancel().catch(() => {});
-  };
-  if (signal) {
-    if (signal.aborted) {
-      onUserAbort();
-    } else {
-      signal.addEventListener("abort", onUserAbort, { once: true });
-    }
-  }
+  // User ESC must NOT abort SSE: pi keeps painting while we drain until
+  // run_error(cancelled). Only the 10m timer closes this feeder.
 
   /** @type {LiveRunSession} */
   const session = {
@@ -117,6 +106,9 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     decodeSampleRecorded: false,
     abort,
     timer,
+    requestCancel() {
+      return client.cancel().catch(() => {});
+    },
     markFirstOut() {
       if (session.firstOutAt == null) session.firstOutAt = Date.now();
     },
@@ -145,10 +137,7 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     },
     dispose() {
       clearTimeout(timer);
-      if (signal) {
-        signal.removeEventListener("abort", onAbort);
-        signal.removeEventListener("abort", onUserAbort);
-      }
+      if (signal) signal.removeEventListener("abort", onUserAbort);
       try {
         abort.abort();
       } catch {
@@ -159,6 +148,17 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
       for (const w of waiters) w();
     },
   };
+
+  const onUserAbort = () => {
+    session.requestCancel();
+  };
+  if (signal) {
+    if (signal.aborted) {
+      onUserAbort();
+    } else {
+      signal.addEventListener("abort", onUserAbort, { once: true });
+    }
+  }
 
   setActiveLiveRun(session);
 
@@ -199,10 +199,7 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
       }
     } finally {
       clearTimeout(timer);
-      if (signal) {
-        signal.removeEventListener("abort", onAbort);
-        signal.removeEventListener("abort", onUserAbort);
-      }
+      if (signal) signal.removeEventListener("abort", onUserAbort);
       session.closed = true;
       session.enqueue(null);
     }
