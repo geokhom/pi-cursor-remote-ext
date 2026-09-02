@@ -39,6 +39,13 @@ export function codePointWidth(cp) {
     (cp <= 0x115f ||
       cp === 0x2329 ||
       cp === 0x232a ||
+      (cp >= 0x231a && cp <= 0x231b) ||
+      (cp >= 0x23e9 && cp <= 0x23ec) ||
+      cp === 0x23f0 ||
+      cp === 0x23f3 ||
+      (cp >= 0x25fd && cp <= 0x25fe) ||
+      (cp >= 0x2600 && cp <= 0x27bf) ||
+      (cp >= 0x2b00 && cp <= 0x2bff) ||
       (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
       (cp >= 0xac00 && cp <= 0xd7a3) ||
       (cp >= 0xf900 && cp <= 0xfaff) ||
@@ -48,9 +55,7 @@ export function codePointWidth(cp) {
       (cp >= 0xffe0 && cp <= 0xffe6) ||
       (cp >= 0x1aff0 && cp <= 0x1afff) ||
       (cp >= 0x1b000 && cp <= 0x1b122) ||
-      (cp >= 0x1f300 && cp <= 0x1f64f) ||
-      (cp >= 0x1f900 && cp <= 0x1f9ff) ||
-      (cp >= 0x1fa00 && cp <= 0x1faff) ||
+      (cp >= 0x1f000 && cp <= 0x1ffff) ||
       (cp >= 0x20000 && cp <= 0x2fffd) ||
       (cp >= 0x30000 && cp <= 0x3fffd))
   ) {
@@ -67,8 +72,20 @@ export function visibleWidth(text) {
   if (!text) return 0;
   const s = String(text).replace(ANSI_RE, "");
   let w = 0;
+  let prevCw = 0;
   for (const ch of s) {
-    w += codePointWidth(ch.codePointAt(0));
+    const cp = ch.codePointAt(0);
+    // VS-16: emoji presentation. ⚠ (1) + FE0F → 2; already-wide ✅ stays 2.
+    if (cp === 0xfe0f) {
+      if (prevCw === 1) {
+        w += 1;
+        prevCw = 2;
+      }
+      continue;
+    }
+    const cw = codePointWidth(cp);
+    w += cw;
+    prevCw = cw;
   }
   return w;
 }

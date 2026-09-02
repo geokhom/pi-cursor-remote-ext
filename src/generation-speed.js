@@ -4,10 +4,12 @@
  * Per request: output_tokens / ((end − firstOutAt) / 1000)
  * Across requests in a session: sum(tokens) / sum(decode_ms/1000)
  *
- * Shown on the stock-style stats line immediately before the context %/window.
+ * Shown on the stock-style stats line immediately before the context window
+ * (`200k (auto)` — Cursor Agent packs context; no fill% / pi auto-compact).
  */
 
 import { truncateToWidth, visibleWidth } from "./tui-width.js";
+import { advertisedContextWindow } from "./model-discovery.js";
 
 const STATE_KEY = Symbol.for("pi-cursor-remote.generation-speed.v1");
 
@@ -257,10 +259,7 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
     }
   }
 
-  const contextUsage =
-    typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
-  const advertisedWindow =
-    ctx.model?.contextWindow ?? contextUsage?.contextWindow ?? 0;
+  const advertisedWindow = advertisedContextWindow(ctx.model?.id);
   const contextWindow = advertisedWindow;
   if (
     lastSignificantUsage &&
@@ -276,24 +275,6 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
       promptTokens > 0
         ? ((Number(lastSignificantUsage.cacheRead) || 0) / promptTokens) * 100
         : undefined;
-  }
-
-  const occupancy = lastPromptOccupancy(entries, contextWindow);
-  let contextPercentValue;
-  let contextPercent;
-  if (occupancy > 0 && contextWindow > 0) {
-    contextPercentValue = (occupancy / contextWindow) * 100;
-    contextPercent = contextPercentValue.toFixed(1);
-  } else if (contextWindow > 0) {
-    // No in-window measurement (oversized run-sum rejected, or only crumbs).
-    contextPercentValue = 0;
-    contextPercent = "?";
-  } else {
-    contextPercentValue = contextUsage?.percent ?? 0;
-    contextPercent =
-      contextUsage?.percent != null && contextUsage.percent !== null
-        ? Number(contextUsage.percent).toFixed(1)
-        : "?";
   }
   let pwd =
     typeof ctx.sessionManager?.getCwd === "function"
@@ -334,23 +315,12 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
   const tokLabel = peekTokPerSecLabel();
   if (tokLabel) statsParts.push(tokLabel);
 
-  const contextPercentDisplay =
-    contextPercent === "?"
-      ? `?/${formatFooterTokens(contextWindow)}`
-      : `${contextPercent}%/${formatFooterTokens(contextWindow)}`;
-  let contextPercentStr;
-  if (contextPercentValue > 90) {
-    contextPercentStr = theme.fg
-      ? theme.fg("error", contextPercentDisplay)
-      : contextPercentDisplay;
-  } else if (contextPercentValue > 70) {
-    contextPercentStr = theme.fg
-      ? theme.fg("warning", contextPercentDisplay)
-      : contextPercentDisplay;
-  } else {
-    contextPercentStr = contextPercentDisplay;
-  }
-  statsParts.push(contextPercentStr);
+  // Cursor Agent owns packing — never paint fill% (that trips pi auto-compact).
+  const contextLabel =
+    contextWindow > 0
+      ? `${formatFooterTokens(contextWindow)} (auto)`
+      : "? (auto)";
+  statsParts.push(contextLabel);
 
   let statsLeft = statsParts.join(" ");
   const modelName = ctx.model?.id || "no-model";

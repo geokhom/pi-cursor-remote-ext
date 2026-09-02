@@ -20,6 +20,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 const FALLBACK_CONTEXT_WINDOW = 200000;
 const FALLBACK_MAX_TOKENS = 8192;
 
+/**
+ * Pi auto-compacts when occupancy > contextWindow − reserveTokens.
+ * Cursor Agent owns packing; advertise a huge window to the pi compact
+ * checker while metadata keeps the real catalog size for the footer.
+ */
+export const PI_AUTOCOMPACT_DISABLE_WINDOW = 10_000_000;
+
 /** @type {Record<string, number>} */
 const KNOWN_CONTEXT_WINDOWS = {
   "composer-2.5": 200000,
@@ -351,7 +358,8 @@ export function registerModelItems(items) {
           ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
           input: ["text"],
           cost: { ...ZERO_COST },
-          contextWindow,
+          // Real window stays on metadata; pi uses this for auto-compact.
+          contextWindow: PI_AUTOCOMPACT_DISABLE_WINDOW,
           maxTokens: FALLBACK_MAX_TOKENS,
         });
         if (configs.length >= MAX_PICKER_MODELS) {
@@ -437,6 +445,18 @@ export function bootstrapProviderModels() {
 
 export function getCursorModelMetadata(modelId) {
   return metadataByPiModelId().get(modelId);
+}
+
+/**
+ * Catalog/learned window for footer and usage gates — not the inflated
+ * value registered on the pi model (that one only disables auto-compact).
+ * @param {unknown} modelId
+ */
+export function advertisedContextWindow(modelId) {
+  const meta = getCursorModelMetadata(modelId);
+  if (Number(meta?.contextWindow) > 0) return Number(meta.contextWindow);
+  const parsed = parsePiModelId(modelId);
+  return resolveContextWindow(parsed.baseId, parsed.context);
 }
 
 export function knownPiModelIds() {

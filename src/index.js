@@ -46,6 +46,7 @@ import {
   saveModelsCache,
   registerModelItems,
   resolveModelOrFallback,
+  advertisedContextWindow,
 } from "./model-discovery.js";
 import { installGenerationSpeedFooter } from "./generation-speed.js";
 import { installMcpAutoRefresh } from "./mcp-auto-refresh.js";
@@ -285,7 +286,7 @@ function streamSimple(model, context, options) {
           id: piModelId,
           api: model?.api || "cursor-remote-bridge",
           provider: model?.provider || "cursor-remote",
-          contextWindow: model?.contextWindow,
+          contextWindow: advertisedContextWindow(piModelId),
           maxTokens: model?.maxTokens,
         },
         onStreamEvent: (ev) => {
@@ -637,6 +638,7 @@ export {
   saveModelsCache,
   loadModelsCache,
   modelsCachePath,
+  advertisedContextWindow,
 } from "./model-discovery.js";
 export { tryApplyWireUsage, applyCursorSdkUsage } from "./usage-accounting.js";
 export {
