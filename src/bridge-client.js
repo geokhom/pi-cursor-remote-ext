@@ -1285,6 +1285,12 @@ async function drainLiveRunTurn(opts = {}) {
       } else {
         output.errorMessage = ev.message ? `${kind}: ${ev.message}` : kind;
       }
+    } else if (ev.type === "downlink_resync") {
+      endThinkingBlock();
+      const line =
+        (typeof ev.message === "string" && ev.message) ||
+        "[wire] Downlink catch-up: skipped a stuck packet; session kept.";
+      appendStatusLine(line);
     } else if (ev.type === "cancel_ack") {
       const phase = ev.phase || "";
       if (phase === "uplink_ok" || ev.uplink) {
