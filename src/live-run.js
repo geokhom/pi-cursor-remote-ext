@@ -166,6 +166,7 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     try {
       for await (const ev of client.events(abort.signal)) {
         if (!ev || typeof ev !== "object") continue;
+        if (ev.type === "run_heartbeat") continue;
         session.rawEvents.push(ev);
         if (ev.type === "tool_call") {
           const id = typeof ev.call_id === "string" ? ev.call_id : "";
