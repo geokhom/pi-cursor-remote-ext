@@ -697,8 +697,18 @@ export function formatToolArgs(args) {
     }
   }
   // contour__shell — show command like local bash UI
-  if (typeof o.command === "string" && Object.keys(o).length <= 3) {
+  if (typeof o.command === "string" && Object.keys(o).length <= 5) {
     return o.command;
+  }
+  // contour__glob — glob_pattern [target]
+  if (typeof o.glob_pattern === "string") {
+    const extra =
+      typeof o.target_directory === "string" && o.target_directory
+        ? ` ${o.target_directory}`
+        : typeof o.path === "string" && o.path
+          ? ` ${o.path}`
+          : "";
+    return o.glob_pattern + extra;
   }
   // contour__grep — pattern [path]
   if (typeof o.pattern === "string") {

@@ -12,6 +12,7 @@ export const CONTOUR_WIRE_TOOLS = Object.freeze([
   "contour__list_dir",
   "contour__read_file",
   "contour__grep",
+  "contour__glob",
   "contour__write_file",
   "contour__str_replace",
   "contour__mkdir",
@@ -29,6 +30,9 @@ export const BUILTIN_SHADOW_ALIASES = Object.freeze({
   Read: "read_file",
   Grep: "grep",
   Write: "write_file",
+  Edit: "str_replace",
+  Glob: "glob",
+  LS: "list_dir",
   Delete: "delete_path",
 });
 
