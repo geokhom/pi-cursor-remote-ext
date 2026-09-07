@@ -9,6 +9,13 @@
  * one session — same pattern as result-stash.js.
  */
 
+import {
+  SSE_RECONNECT_MAX,
+  isReconnectableSseError,
+  sleepAbortable,
+  sseReconnectDelayMs,
+} from "./sse-reconnect.js";
+
 const STATE_KEY = Symbol.for("pi-cursor-remote.live-run.v1");
 
 /** Settle window to gather parallel tool_call events (ms). */
@@ -89,9 +96,19 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
   clearLiveRun();
 
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  const timer = setTimeout(() => {
+    session.error = new Error(
+      `bridge event wait timed out (${Math.round(timeoutMs / 1000)}s)`
+    );
+    try {
+      abort.abort();
+    } catch {
+      // ignore
+    }
+  }, timeoutMs);
   // User ESC must NOT abort SSE: pi keeps painting while we drain until
   // run_error(cancelled). Only the 10m timer closes this feeder.
+  // Pi aborting a finished toolUse turn's AbortSignal must NOT cancel the VPS run.
 
   /** @type {LiveRunSession} */
   const session = {
@@ -137,7 +154,6 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     },
     dispose() {
       clearTimeout(timer);
-      if (signal) signal.removeEventListener("abort", onUserAbort);
       try {
         abort.abort();
       } catch {
@@ -149,58 +165,73 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     },
   };
 
-  const onUserAbort = () => {
-    session.requestCancel();
-  };
-  if (signal) {
-    if (signal.aborted) {
-      onUserAbort();
-    } else {
-      signal.addEventListener("abort", onUserAbort, { once: true });
-    }
-  }
-
   setActiveLiveRun(session);
 
   (async () => {
+    let after = 0;
+    let attempt = 0;
     try {
-      for await (const ev of client.events(abort.signal)) {
-        if (!ev || typeof ev !== "object") continue;
-        if (ev.type === "run_heartbeat") continue;
-        session.rawEvents.push(ev);
-        if (ev.type === "tool_call") {
-          const id = typeof ev.call_id === "string" ? ev.call_id : "";
-          if (id) session.awaitingToolExec.add(id);
-        } else if (ev.type === "tool_executed") {
-          const id = typeof ev.call_id === "string" ? ev.call_id : "";
-          if (id) session.awaitingToolExec.delete(id);
-        } else if (ev.type === "run_finished") {
-          session.sawRunFinished = true;
+      while (!abort.signal.aborted && !session.closed) {
+        try {
+          let gotEvent = false;
+          for await (const ev of client.events(abort.signal, {
+            after,
+            catchup: attempt > 0 || after > 0,
+          })) {
+            if (!ev || typeof ev !== "object") continue;
+            if (typeof ev.sse_seq === "number" && ev.sse_seq > after) {
+              after = ev.sse_seq;
+            }
+            if (ev.type === "run_heartbeat") continue;
+            gotEvent = true;
+            attempt = 0;
+            session.rawEvents.push(ev);
+            if (ev.type === "tool_call") {
+              const id = typeof ev.call_id === "string" ? ev.call_id : "";
+              if (id) session.awaitingToolExec.add(id);
+            } else if (ev.type === "tool_executed") {
+              const id = typeof ev.call_id === "string" ? ev.call_id : "";
+              if (id) session.awaitingToolExec.delete(id);
+            } else if (ev.type === "run_finished") {
+              session.sawRunFinished = true;
+            }
+            session.enqueue(ev);
+            const terminal =
+              ev.type === "run_error" ||
+              ev.type === "session_end" ||
+              (session.sawRunFinished && session.awaitingToolExec.size === 0);
+            if (terminal) return;
+          }
+          if (abort.signal.aborted || session.closed) return;
+          if (session.sawRunFinished && session.awaitingToolExec.size === 0) {
+            return;
+          }
+          // Unexpected EOF (Node often surfaces this as Error: aborted).
+          if (!gotEvent && attempt === 0 && after === 0) {
+            // Connected then closed before any event — still retry.
+          }
+          throw new Error("aborted");
+        } catch (err) {
+          if (abort.signal.aborted || session.closed) {
+            return;
+          }
+          if (!isReconnectableSseError(err) || attempt >= SSE_RECONNECT_MAX) {
+            session.error =
+              err instanceof Error ? err : new Error(String(err ?? "sse error"));
+            return;
+          }
+          attempt += 1;
+          session.enqueue({
+            type: "sse_reconnect",
+            attempt,
+            max_attempts: SSE_RECONNECT_MAX,
+            message: `[wire] SSE reconnecting (${attempt}/${SSE_RECONNECT_MAX})…`,
+          });
+          await sleepAbortable(sseReconnectDelayMs(attempt), abort.signal);
         }
-        session.enqueue(ev);
-        const terminal =
-          ev.type === "run_error" ||
-          ev.type === "session_end" ||
-          (session.sawRunFinished && session.awaitingToolExec.size === 0);
-        if (terminal) break;
-      }
-    } catch (err) {
-      const name = err && typeof err === "object" && "name" in err ? err.name : "";
-      if (name === "AbortError") {
-        // Our 10m timer (not pi's cancel): surface a real error instead of a
-        // silent close that the TUI paints as "Error: aborted".
-        if (!(signal && signal.aborted)) {
-          session.error = new Error(
-            `bridge event wait timed out (${Math.round(timeoutMs / 1000)}s)`
-          );
-        }
-      } else {
-        session.error =
-          err instanceof Error ? err : new Error(String(err ?? "sse error"));
       }
     } finally {
       clearTimeout(timer);
-      if (signal) signal.removeEventListener("abort", onUserAbort);
       session.closed = true;
       session.enqueue(null);
     }

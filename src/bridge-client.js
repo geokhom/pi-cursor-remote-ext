@@ -361,9 +361,12 @@ export class BridgeClient {
   /**
    * GET /events — async iterator of parsed SSE `data:` JSON objects.
    * @param {AbortSignal} [signal]
+   * @param {{ after?: number, catchup?: boolean }} [opts] replay cursor; catchup replays buffer
    */
-  async *events(signal) {
-    const stream = await this._openEventStream(signal);
+  async *events(signal, opts = {}) {
+    const after = Number(opts.after) > 0 ? Math.floor(Number(opts.after)) : 0;
+    const catchup = Boolean(opts.catchup) || after > 0;
+    const stream = await this._openEventStream(signal, { after, catchup });
     let buf = "";
     for await (const chunk of stream) {
       buf += chunk.toString("utf8");
@@ -479,27 +482,33 @@ export class BridgeClient {
     });
   }
 
-  _openEventStream(signal) {
+  _openEventStream(signal, opts = {}) {
+    const after = Number(opts.after) > 0 ? Math.floor(Number(opts.after)) : 0;
+    const catchup = Boolean(opts.catchup) || after > 0;
+    const qs = [];
+    if (after > 0) qs.push(`after=${after}`);
+    if (catchup) qs.push("catchup=1");
+    const eventsPath = qs.length ? `/events?${qs.join("&")}` : "/events";
     return new Promise((resolve, reject) => {
-      const opts = {
+      const reqOpts = {
         method: "GET",
-        path: "/events",
+        path: eventsPath,
         headers: this._headers({ Accept: "text/event-stream" }),
       };
       let reqFn;
       if (this.unixPath) {
         assertUnixSocketSafe(this.unixPath);
-        opts.socketPath = this.unixPath;
-        opts.host = "localhost";
+        reqOpts.socketPath = this.unixPath;
+        reqOpts.host = "localhost";
         reqFn = httpRequest;
       } else {
-        const u = new URL(this.baseUrl + "/events");
-        opts.hostname = u.hostname;
-        opts.port = u.port;
-        opts.path = u.pathname;
+        const u = new URL(this.baseUrl + eventsPath);
+        reqOpts.hostname = u.hostname;
+        reqOpts.port = u.port;
+        reqOpts.path = u.pathname + u.search;
         reqFn = u.protocol === "https:" ? httpsRequest : httpRequest;
       }
-      const req = reqFn(opts, (res) => {
+      const req = reqFn(reqOpts, (res) => {
         if ((res.statusCode || 0) >= 400) {
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
@@ -852,19 +861,30 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     opts.signal,
     opts.timeoutMs ?? 600_000
   );
-  await new Promise((r) => setTimeout(r, 30));
-  const model = opts.model || {};
-  const promptChars = typeof text === "string" ? text.length : 0;
-  await client.prompt(text, opts.requestId, {
-    model:
-      opts.modelSelection ||
-      (typeof model.id === "string" ? model.id : undefined),
-    mode: opts.mode,
-  });
+  const onPromptAbort = () => {
+    if (typeof session.requestCancel === "function") session.requestCancel();
+  };
+  if (opts.signal) {
+    if (opts.signal.aborted) onPromptAbort();
+    else opts.signal.addEventListener("abort", onPromptAbort, { once: true });
+  }
+  try {
+    await new Promise((r) => setTimeout(r, 30));
+    const model = opts.model || {};
+    const promptChars = typeof text === "string" ? text.length : 0;
+    await client.prompt(text, opts.requestId, {
+      model:
+        opts.modelSelection ||
+        (typeof model.id === "string" ? model.id : undefined),
+      mode: opts.mode,
+    });
+  } finally {
+    if (opts.signal) opts.signal.removeEventListener("abort", onPromptAbort);
+  }
 
   const result = await drainLiveRunTurn({
     ...opts,
-    _promptChars: promptChars,
+    _promptChars: typeof text === "string" ? text.length : 0,
   });
   return { ...result, grants };
 }
@@ -1285,11 +1305,15 @@ async function drainLiveRunTurn(opts = {}) {
       } else {
         output.errorMessage = ev.message ? `${kind}: ${ev.message}` : kind;
       }
-    } else if (ev.type === "downlink_resync") {
+    } else if (ev.type === "downlink_resync" || ev.type === "uplink_retry" || ev.type === "sse_reconnect") {
       endThinkingBlock();
       const line =
         (typeof ev.message === "string" && ev.message) ||
-        "[wire] Downlink catch-up: skipped a stuck packet; session kept.";
+        (ev.type === "uplink_retry"
+          ? "[wire] Uplink retry…"
+          : ev.type === "sse_reconnect"
+            ? "[wire] SSE reconnecting…"
+            : "[wire] Downlink catch-up: skipped a stuck packet; session kept.");
       appendStatusLine(line);
     } else if (ev.type === "cancel_ack") {
       const phase = ev.phase || "";
