@@ -769,8 +769,63 @@ export function formatToolCallLines(displayName, args, opts = {}) {
 }
 
 /**
+ * Whether a bridge tool_executed payload should paint as a failed tool.
+ * Wire `ok` is protocol-level (the handler ran); shell non-zero exit still
+ * sends ok=true with exit_code. TUI error = ok=false, error payload, or
+ * non-zero/timed-out shell.
+ *
+ * @param {unknown} ok
+ * @param {unknown} content
+ * @returns {boolean}
+ */
+export function isToolExecutionError(ok, content) {
+  if (ok === false) return true;
+  if (content == null || typeof content !== "object" || Array.isArray(content)) {
+    return false;
+  }
+  const o = /** @type {Record<string, unknown>} */ (content);
+  if (o.isError === true || o.is_error === true) return true;
+  if (o.timed_out === true) return true;
+  if (typeof o.exit_code === "number" && o.exit_code !== 0) return true;
+  if (typeof o.error === "string" && o.error.length > 0) return true;
+  return false;
+}
+
+/**
+ * @param {Record<string, unknown>} o
+ * @returns {boolean}
+ */
+function isShellShapedResult(o) {
+  return (
+    typeof o.exit_code === "number" ||
+    typeof o.stdout === "string" ||
+    typeof o.stderr === "string"
+  );
+}
+
+/**
+ * @param {Record<string, unknown>} o
+ * @returns {string}
+ */
+function formatShellResult(o) {
+  const parts = [];
+  const stdout = typeof o.stdout === "string" ? o.stdout.replace(/\s+$/, "") : "";
+  const stderr = typeof o.stderr === "string" ? o.stderr.replace(/\s+$/, "") : "";
+  if (stdout) parts.push(stdout);
+  if (stderr) parts.push(stderr);
+  if (typeof o.exit_code === "number" && o.exit_code !== 0) {
+    parts.push(`exit ${o.exit_code}`);
+  }
+  if (o.timed_out) parts.push("timed out");
+  if (typeof o.error === "string" && o.error) parts.push(o.error);
+  return parts.join("\n");
+}
+
+/**
  * Format tool result preview for TUI.
  * Unwraps common {output|stdout|content|text|result|message} shapes.
+ * Shell-shaped payloads include stderr and non-zero exit (empty stdout
+ * must not hide the failure).
  * @param {unknown} content
  * @param {boolean} [ok]
  */
@@ -792,17 +847,25 @@ export function formatToolResult(content, ok = true) {
       .join("\n");
   } else if (content != null && typeof content === "object") {
     const o = /** @type {Record<string, unknown>} */ (content);
-    for (const k of ["output", "stdout", "text", "message", "result", "content"]) {
-      if (typeof o[k] === "string") {
-        body = o[k];
-        break;
+    if (isShellShapedResult(o)) {
+      body = formatShellResult(o);
+    } else if (typeof o.error === "string" && o.error) {
+      const msg = typeof o.message === "string" ? o.message : "";
+      const hint = typeof o.hint === "string" ? o.hint : "";
+      body = [o.error, msg, hint].filter(Boolean).join("\n");
+    } else {
+      for (const k of ["output", "stdout", "text", "message", "result", "content"]) {
+        if (typeof o[k] === "string" && o[k]) {
+          body = o[k];
+          break;
+        }
       }
-    }
-    if (!body) {
-      try {
-        body = JSON.stringify(content, null, 0);
-      } catch {
-        body = String(content);
+      if (!body) {
+        try {
+          body = JSON.stringify(content, null, 0);
+        } catch {
+          body = String(content);
+        }
       }
     }
   } else if (content != null) {
@@ -1282,7 +1345,7 @@ async function drainLiveRunTurn(opts = {}) {
       trackCallId(display, id);
       if (callId) pendingExec.delete(callId);
       stashToolResult(id, {
-        ok: ev.ok !== false,
+        ok: !isToolExecutionError(ev.ok, ev.content),
         content: ev.content,
         name: wireName || undefined,
         displayName: display,

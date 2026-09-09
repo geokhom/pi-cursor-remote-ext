@@ -609,6 +609,7 @@ export {
   formatToolArgs,
   formatToolCallLines,
   formatToolResult,
+  isToolExecutionError,
   layoutToolPanelLines,
   unwrapToolArgs,
   wrapToWidth,
@@ -616,6 +617,7 @@ export {
   thinkingJoinNeedsSpace,
   assertUnixSocketSafe,
 } from "./bridge-client.js";
+export { toolErrorOverride } from "./shadow-tools.js";
 export { displayToolName } from "./tool-display.js";
 export {
   loadConfig,

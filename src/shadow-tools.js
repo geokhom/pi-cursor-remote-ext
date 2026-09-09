@@ -18,6 +18,7 @@ import {
   formatToolCallLines,
   formatToolResult,
   hasActiveLiveRun,
+  isToolExecutionError,
   layoutToolPanelLines,
 } from "./bridge-client.js";
 import { truncateToWidth } from "./tui-width.js";
@@ -82,11 +83,28 @@ function panelLinesComponent(linesOrFn, style = {}) {
 }
 
 /**
+ * Pi's agent loop ignores execute() `isError` (only throws or this hook
+ * paint toolErrorBg). Return `{ isError: true }` and nothing else so the
+ * field-by-field merge keeps content. Same pattern as pi-mcp-adapter.
+ *
+ * @param {unknown} details
+ * @returns {{ isError: true } | undefined}
+ */
+export function toolErrorOverride(details) {
+  if (!details || typeof details !== "object") return undefined;
+  if (/** @type {{ ok?: unknown }} */ (details).ok === false) {
+    return { isError: true };
+  }
+  return undefined;
+}
+
+/**
  * @param {unknown} content
+ * @param {boolean} [ok]
  * @returns {string}
  */
-function contentToText(content) {
-  return formatToolResult(content, true);
+function contentToText(content, ok = true) {
+  return formatToolResult(content, ok);
 }
 
 /**
@@ -106,13 +124,14 @@ function makeShadowTool(displayName) {
         { theme, color: "toolTitle", bold: true }
       );
     },
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
       const text = (result?.content || [])
         .filter((c) => c && c.type === "text" && typeof c.text === "string")
         .map((c) => c.text)
         .join("\n");
       if (!text) return panelLinesComponent([""]);
-      const color = result?.isError ? "error" : "toolOutput";
+      const color =
+        result?.isError || context?.isError ? "error" : "toolOutput";
       const expanded = Boolean(options?.expanded);
       if (expanded) {
         return panelLinesComponent(text.split(/\r?\n/), {
@@ -144,16 +163,19 @@ function makeShadowTool(displayName) {
                 "This tool only completes Cursor Remote runs.",
             },
           ],
-          details: {},
+          details: { ok: false },
           isError: true,
           terminate,
         };
       }
-      const body = contentToText(stashed.content);
+      const isError = isToolExecutionError(stashed.ok, stashed.content);
+      const body = contentToText(stashed.content, !isError);
       const result = {
-        content: [{ type: "text", text: body || (stashed.ok ? "(ok)" : "(failed)") }],
-        details: { wireName: stashed.name, ok: stashed.ok },
-        isError: stashed.ok === false,
+        content: [
+          { type: "text", text: body || (isError ? "(failed)" : "(ok)") },
+        ],
+        details: { wireName: stashed.name, ok: !isError },
+        isError,
         terminate,
       };
       if (typeof onUpdate === "function") onUpdate(result);
@@ -299,6 +321,7 @@ export function registerShadowTools(pi) {
   };
 
   if (typeof pi.on === "function") {
+    pi.on("tool_result", (ev) => toolErrorOverride(ev?.details));
     pi.on("model_select", (ev) => {
       syncActive(ev?.model);
     });
