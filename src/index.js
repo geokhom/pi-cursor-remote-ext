@@ -55,6 +55,7 @@ import {
   lastUserText,
   runSummarizationViaBridge,
 } from "./compaction.js";
+import { registerCursorRemoteCompatApi } from "./compat-api.js";
 
 /** @type {import('./types.js').ExtensionAPI | null} */
 let _piRef = null;
@@ -116,33 +117,6 @@ function createProviderConfig(models) {
 
 function registerCursorRemoteProvider(pi, models) {
   pi.registerProvider("cursor-remote", createProviderConfig(models));
-}
-
-/**
- * Hermes (and other completeSimple callers) use `@earendil-works/pi-ai/compat`,
- * which does not see ModelRuntime-scoped `registerProvider` handlers. Best-effort
- * register the same streamSimple under api `cursor-remote-bridge`.
- */
-async function registerCursorRemoteCompatApi() {
-  const specs = ["@earendil-works/pi-ai/compat", "@earendil-works/pi-ai"];
-  for (const spec of specs) {
-    try {
-      const mod = await import(spec);
-      const reg = mod.registerApiProvider;
-      if (typeof reg !== "function") continue;
-      reg(
-        {
-          api: "cursor-remote-bridge",
-          stream: streamSimple,
-          streamSimple,
-        },
-        "provider:cursor-remote"
-      );
-      return;
-    } catch {
-      // Pi host may hide pi-ai from extension resolution.
-    }
-  }
 }
 
 /**
@@ -392,7 +366,9 @@ export default async function register(pi) {
   // Register immediately so pi TUI has a model + slash commands even if the
   // bridge GET /models hangs (no HTTP timeout on the client).
   registerCursorRemoteProvider(pi, models);
-  await registerCursorRemoteCompatApi();
+  await registerCursorRemoteCompatApi(streamSimple, {
+    importMetaUrl: import.meta.url,
+  });
 
   const client =
     conn.baseUrl || conn.unixPath
@@ -432,6 +408,13 @@ export default async function register(pi) {
       shadowApi?.syncActive?.(_lastModel);
       if (ctx?.ui) lastUi = ctx.ui;
       installGenerationSpeedFooter(ctx);
+      try {
+        await registerCursorRemoteCompatApi(streamSimple, {
+          importMetaUrl: import.meta.url,
+        });
+      } catch {
+        // hermes completeSimple stays on subprocess if host pi-ai is hidden
+      }
       if (!client) return;
       try {
         await ensureCursorRemoteSession(ctx);
