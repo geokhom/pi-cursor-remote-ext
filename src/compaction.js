@@ -23,6 +23,26 @@ export function isSummarizationRequest(options) {
 }
 
 /**
+ * Isolated LLM calls that must not hit the coding Agent (empty hello tools).
+ * Covers Pi `/compact` (`toolChoice: "none"`) and in-process `completeSimple`
+ * from extensions such as pi-hermes-memory (system prompt + few messages,
+ * no tool snapshot). Coding turns always snapshot active tools.
+ *
+ * @param {object | undefined} context
+ * @param {object | undefined} options
+ */
+export function isSideChannelCompletion(context, options) {
+  if (isSummarizationRequest(options)) return true;
+  const tools = context?.tools;
+  if (Array.isArray(tools) && tools.length > 0) return false;
+  const sys =
+    typeof context?.systemPrompt === "string" && context.systemPrompt.trim().length > 0;
+  if (!sys) return false;
+  const n = Array.isArray(context?.messages) ? context.messages.length : 0;
+  return n <= 2;
+}
+
+/**
  * @param {object | undefined} context
  */
 export function lastUserText(context) {

@@ -36,7 +36,6 @@ import {
 } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
 import { takeFollowUp } from "./result-stash.js";
-import { shadowToolNames } from "./tool-display.js";
 import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js";
 import {
   buildCursorModelSelection,
@@ -52,13 +51,15 @@ import { installGenerationSpeedFooter } from "./generation-speed.js";
 import { installMcpAutoRefresh } from "./mcp-auto-refresh.js";
 import {
   createLocalStream,
-  isSummarizationRequest,
+  isSideChannelCompletion,
   lastUserText,
   runSummarizationViaBridge,
 } from "./compaction.js";
 
 /** @type {import('./types.js').ExtensionAPI | null} */
 let _piRef = null;
+/** @type {{ syncActive?: Function } | null} */
+let _shadowApi = null;
 /** @type {BridgeClient | null} */
 let _bridgeClient = null;
 /** @type {string} */
@@ -118,6 +119,33 @@ function registerCursorRemoteProvider(pi, models) {
 }
 
 /**
+ * Hermes (and other completeSimple callers) use `@earendil-works/pi-ai/compat`,
+ * which does not see ModelRuntime-scoped `registerProvider` handlers. Best-effort
+ * register the same streamSimple under api `cursor-remote-bridge`.
+ */
+async function registerCursorRemoteCompatApi() {
+  const specs = ["@earendil-works/pi-ai/compat", "@earendil-works/pi-ai"];
+  for (const spec of specs) {
+    try {
+      const mod = await import(spec);
+      const reg = mod.registerApiProvider;
+      if (typeof reg !== "function") continue;
+      reg(
+        {
+          api: "cursor-remote-bridge",
+          stream: streamSimple,
+          streamSimple,
+        },
+        "provider:cursor-remote"
+      );
+      return;
+    } catch {
+      // Pi host may hide pi-ai from extension resolution.
+    }
+  }
+}
+
+/**
  * @param {BridgeClient} client
  * @param {{ timeoutMs?: number, preferLive?: boolean }} [opts]
  */
@@ -157,7 +185,7 @@ function streamSimple(model, context, options) {
   const stream = createLocalStream();
   (async () => {
     try {
-      if (isSummarizationRequest(options)) {
+      if (isSideChannelCompletion(context, options)) {
         try {
           await ensureCursorRemoteSession({
             sessionManager: context?.sessionManager,
@@ -176,14 +204,8 @@ function streamSimple(model, context, options) {
         });
         return;
       }
-      if (_piRef && typeof _piRef.setActiveTools === "function") {
-        const shadow = shadowToolNames();
-        const cur = _piRef.getActiveTools?.() || [];
-        const merged = [...new Set([...cur.filter((n) => !shadow.includes(n)), ...shadow])];
-        _piRef.setActiveTools(merged);
-      }
-
       _lastModel = model || _lastModel;
+      _shadowApi?.syncActive?.(_lastModel);
       try {
         await ensureCursorRemoteSession({
           sessionManager: context?.sessionManager,
@@ -370,6 +392,7 @@ export default async function register(pi) {
   // Register immediately so pi TUI has a model + slash commands even if the
   // bridge GET /models hangs (no HTTP timeout on the client).
   registerCursorRemoteProvider(pi, models);
+  await registerCursorRemoteCompatApi();
 
   const client =
     conn.baseUrl || conn.unixPath
@@ -383,6 +406,7 @@ export default async function register(pi) {
 
   /** @type {{ syncMcpShadows?: Function } | null} */
   const shadowApi = registerShadowTools(pi);
+  _shadowApi = shadowApi;
 
   /** @type {{ notify?: Function } | null} */
   let lastUi = null;
@@ -592,6 +616,7 @@ export {
 };
 export {
   createLocalStream,
+  isSideChannelCompletion,
   isSummarizationRequest,
   lastUserText,
   runSummarizationViaBridge,

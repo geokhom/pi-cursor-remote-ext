@@ -66,8 +66,18 @@ export function displayToolNames() {
 }
 
 /**
- * All names Pi may look up after a Cursor Remote tool_use (display, wire, aliases).
- * Missing any of these → "Tool shell not found".
+ * Names to put in Pi `setActiveTools` on Cursor Remote.
+ * `emitToolCall` uses display names (`shell`, `mcp__grafana__…`), not wire or
+ * PascalCase aliases. Activating those extras tripled MCP stubs in `/context`.
+ * @returns {string[]}
+ */
+export function activeShadowNames() {
+  return displayToolNames();
+}
+
+/**
+ * All names to `registerTool` so execute lookup can still resolve wire/aliases.
+ * Missing any of these → "Tool shell not found" if a caller uses that spelling.
  * @returns {string[]}
  */
 export function shadowToolNames() {

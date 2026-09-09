@@ -7,7 +7,12 @@
  * "Rendered line N exceeds terminal width".
  */
 
-import { displayToolName, setMcpWireTools, shadowToolNames } from "./tool-display.js";
+import {
+  activeShadowNames,
+  displayToolName,
+  setMcpWireTools,
+  shadowToolNames,
+} from "./tool-display.js";
 import { takeToolResult, hasFollowUpText } from "./result-stash.js";
 import {
   formatToolCallLines,
@@ -187,6 +192,45 @@ export function shouldActivateShadows(model) {
 }
 
 /**
+ * @param {unknown} listed `getAllTools()` / `getActiveTools()` payload
+ * @returns {string[]}
+ */
+export function extractToolNames(listed) {
+  if (!Array.isArray(listed)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const t of listed) {
+    const n = typeof t === "string" ? t : t && typeof t.name === "string" ? t.name : "";
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * Replace (do not merge) the active set on Cursor Remote so Pi builtins, MCP
+ * adapter schemas, and other extensions drop out of `/context`. Off Cursor
+ * Remote, restore non-shadow tools. `remembered` keeps foreign names after a
+ * replace when `getAllTools` is unavailable and `getActiveTools` is already
+ * shadows-only.
+ *
+ * @param {string[] | unknown} listed
+ * @param {unknown} model
+ * @param {string[]} [remembered]
+ * @returns {{ active: string[], foreign: string[] }}
+ */
+export function nextActiveToolNames(listed, model, remembered = []) {
+  const shadow = new Set(shadowToolNames());
+  const foreign = extractToolNames(listed).filter((n) => !shadow.has(n));
+  const keep = foreign.length ? foreign : extractToolNames(remembered);
+  if (shouldActivateShadows(model)) {
+    return { active: activeShadowNames(), foreign: keep };
+  }
+  return { active: keep, foreign: keep };
+}
+
+/**
  * @param {import('./types.js').ExtensionAPI} pi
  */
 export function registerShadowTools(pi) {
@@ -207,10 +251,14 @@ export function registerShadowTools(pi) {
     ensureShadow(name);
   }
 
+  /** @type {string[]} */
+  let rememberedForeign = [];
+
   /**
    * Agent-loop snapshots `context.tools` at turn start. Mid-stream
    * setActiveTools (inside streamSimple) is too late — execute sees the old
    * list and returns "Tool shell not found". Activate before the snapshot.
+   * Cursor Remote: replace with display shadows only (not merge).
    * @param {unknown} model
    */
   const syncActive = (model) => {
@@ -219,13 +267,13 @@ export function registerShadowTools(pi) {
     }
     const shadow = new Set(shadowToolNames());
     for (const name of shadow) ensureShadow(name);
-    const current = pi.getActiveTools() || [];
-    const without = current.filter((n) => !shadow.has(n) && !_registeredShadows.has(n));
-    if (shouldActivateShadows(model)) {
-      pi.setActiveTools([...without, ...shadow]);
-    } else {
-      pi.setActiveTools(without);
-    }
+    const listed =
+      typeof pi.getAllTools === "function"
+        ? extractToolNames(pi.getAllTools())
+        : extractToolNames(pi.getActiveTools() || []);
+    const { active, foreign } = nextActiveToolNames(listed, model, rememberedForeign);
+    rememberedForeign = foreign;
+    pi.setActiveTools(active);
   };
 
   /**
@@ -267,5 +315,10 @@ export function registerShadowTools(pi) {
   return { syncActive, syncMcpShadows, ensureShadow };
 }
 
-export { displayToolName, setMcpWireTools, shadowToolNames };
+export {
+  activeShadowNames,
+  displayToolName,
+  setMcpWireTools,
+  shadowToolNames,
+};
 export { truncateToWidth, visibleWidth } from "./tui-width.js";
