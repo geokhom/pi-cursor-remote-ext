@@ -14,6 +14,35 @@ import {
   DEFAULT_MODEL,
 } from "./config.js";
 import { buildCursorModelSelection } from "./model-discovery.js";
+import { hasActiveLiveRun } from "./live-run.js";
+import { sleepAbortable } from "./sse-reconnect.js";
+
+const SUMMARIZE_BUSY_RETRY_MS = 200;
+
+/**
+ * Hermes `turn_end` often fires after a tool batch while the VPS coding run is
+ * still in-flight. Sidecar summarize must not share that SSE (`409 busy`).
+ *
+ * @param {unknown} err
+ */
+export function isBridgeBusyError(err) {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /prompt HTTP 409/.test(msg) && /busy/.test(msg);
+}
+
+/**
+ * @param {AbortSignal | undefined} signal
+ * @param {{ isActive?: () => boolean, intervalMs?: number }} [opts]
+ */
+export async function waitWhileLiveRunActive(signal, opts = {}) {
+  const isActive = opts.isActive || hasActiveLiveRun;
+  const intervalMs = opts.intervalMs ?? SUMMARIZE_BUSY_RETRY_MS;
+  while (isActive()) {
+    if (signal?.aborted) throw new Error("aborted");
+    await sleepAbortable(intervalMs, signal);
+    if (signal?.aborted) throw new Error("aborted");
+  }
+}
 
 /**
  * @param {object | undefined} options streamSimple options from pi
@@ -185,8 +214,10 @@ export async function runSummarizationViaBridge(args) {
     options?.reasoning ||
     context?.thinkingLevel ||
     "off";
-  await runPromptViaBridge(client, text, {
-    signal: options?.signal,
+  const signal = options?.signal;
+  let busyAttempts = 0;
+  const promptOpts = {
+    signal,
     applyGrants: false,
     thinkingDisplay: "off",
     rejectTools: true,
@@ -203,7 +234,20 @@ export async function runSummarizationViaBridge(args) {
       if (ev?.type === "_end") return;
       stream.push(ev);
     },
-  });
+  };
+  for (;;) {
+    await waitWhileLiveRunActive(signal);
+    try {
+      await runPromptViaBridge(client, text, promptOpts);
+      break;
+    } catch (err) {
+      if (!isBridgeBusyError(err) || signal?.aborted) throw err;
+      busyAttempts += 1;
+      if (!signal && busyAttempts > 3000) throw err;
+      await sleepAbortable(SUMMARIZE_BUSY_RETRY_MS, signal);
+      if (signal?.aborted) throw new Error("aborted");
+    }
+  }
   stream.end();
 }
 
