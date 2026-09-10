@@ -1,11 +1,14 @@
 /**
  * Hermes (and other completeSimple callers) dispatch via
  * `@earendil-works/pi-ai/compat`, which does not see ModelRuntime
- * `registerProvider`. This package is not a dependency of pi-cursor-remote,
- * so a bare `import("@earendil-works/pi-ai/compat")` from the extension
- * usually fails. Resolve every copy we can from the Pi host tree and call
- * `registerApiProvider` so they share the same apiProviderRegistry Map as
- * `completeSimple`.
+ * `registerProvider`.
+ *
+ * Pi's bundled CLI loads this package as native ESM (`"type":"module"`),
+ * so `import("@earendil-works/pi-ai/compat")` from our `.js` files never
+ * hits jiti `virtualModules`. Hermes is TypeScript, so its `completeSimple`
+ * *does* use that in-memory copy. `pi-entry.ts` binds
+ * `registerApiProvider` from the jiti-visible specifier; disk walks below
+ * stay as a fallback for unbundled hosts.
  */
 
 import { createRequire } from "node:module";
@@ -13,6 +16,17 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+/** @type {Function | null} */
+let jitiRegisterApiProvider = null;
+
+/**
+ * Bound from `pi-entry.ts` while jiti evaluates that TypeScript file.
+ * @param {unknown} fn
+ */
+export function bindJitiRegisterApiProvider(fn) {
+  if (typeof fn === "function") jitiRegisterApiProvider = fn;
+}
 
 export const CURSOR_REMOTE_API = "cursor-remote-bridge";
 
@@ -172,6 +186,16 @@ async function loadModule(spec, parentFile) {
  */
 export async function registerCursorRemoteCompatApi(streamSimple, opts = {}) {
   let ok = 0;
+  if (jitiRegisterApiProvider) {
+    if (
+      installCursorRemoteOnCompat(
+        { registerApiProvider: jitiRegisterApiProvider },
+        streamSimple
+      )
+    ) {
+      ok += 1;
+    }
+  }
   const parents = [];
   const argv1 = opts.argv1 ?? process.argv[1];
   if (typeof argv1 === "string" && argv1) parents.push(argv1);
