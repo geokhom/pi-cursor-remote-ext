@@ -15,6 +15,10 @@ import {
   sleepAbortable,
   sseReconnectDelayMs,
 } from "./sse-reconnect.js";
+import {
+  startLiveRunUiKeepAlive,
+  stopLiveRunUiKeepAlive,
+} from "./thinking-indicator.js";
 
 const STATE_KEY = Symbol.for("pi-cursor-remote.live-run.v1");
 
@@ -40,6 +44,7 @@ export const TOOL_BATCH_SETTLE_MS = 75;
  * @property {(ev: object) => void} unshift
  * @property {() => void} dispose
  * @property {() => void} markFirstOut
+ * @property {() => void} [bumpIdle]
  */
 
 /**
@@ -73,6 +78,7 @@ export function clearLiveRun() {
     st.session.dispose();
     st.session = null;
   }
+  stopLiveRunUiKeepAlive();
 }
 
 /**
@@ -86,28 +92,22 @@ export function setActiveLiveRun(session) {
   st.session = session;
 }
 
+/** Idle abort after last SSE event. Must exceed TOOL_WAIT (600s). */
+export const LIVE_RUN_IDLE_MS = 900_000;
+
 /**
  * @param {import("./bridge-client.js").BridgeClient} client
  * @param {AbortSignal} [signal]
  * @param {number} [timeoutMs]
  * @returns {LiveRunSession}
  */
-export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
+export function startLiveEventFeeder(client, signal, timeoutMs = LIVE_RUN_IDLE_MS) {
   clearLiveRun();
 
   const abort = new AbortController();
-  const timer = setTimeout(() => {
-    session.error = new Error(
-      `bridge event wait timed out (${Math.round(timeoutMs / 1000)}s)`
-    );
-    try {
-      abort.abort();
-    } catch {
-      // ignore
-    }
-  }, timeoutMs);
   // User ESC must NOT abort SSE: pi keeps painting while we drain until
-  // run_error(cancelled). Only the 10m timer closes this feeder.
+  // run_error(cancelled). Idle timer (reset on every SSE event, including
+  // run_heartbeat) closes this feeder — not a wall clock from prompt start.
   // Pi aborting a finished toolUse turn's AbortSignal must NOT cancel the VPS run.
 
   /** @type {LiveRunSession} */
@@ -122,7 +122,20 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     firstOutAt: null,
     decodeSampleRecorded: false,
     abort,
-    timer,
+    timer: null,
+    bumpIdle() {
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = setTimeout(() => {
+        session.error = new Error(
+          `bridge event wait timed out (${Math.round(timeoutMs / 1000)}s idle)`
+        );
+        try {
+          abort.abort();
+        } catch {
+          // ignore
+        }
+      }, timeoutMs);
+    },
     requestCancel() {
       return client.cancel().catch(() => {});
     },
@@ -130,6 +143,7 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
       if (session.firstOutAt == null) session.firstOutAt = Date.now();
     },
     enqueue(ev) {
+      if (ev && typeof ev === "object") session.bumpIdle();
       session.queue.push(ev);
       const waiters = session.waiters.splice(0);
       for (const w of waiters) w();
@@ -153,7 +167,9 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
       return null;
     },
     dispose() {
-      clearTimeout(timer);
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = null;
+      stopLiveRunUiKeepAlive();
       try {
         abort.abort();
       } catch {
@@ -165,7 +181,9 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
     },
   };
 
+  session.bumpIdle();
   setActiveLiveRun(session);
+  startLiveRunUiKeepAlive();
 
   (async () => {
     let after = 0;
@@ -182,9 +200,13 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
             if (typeof ev.sse_seq === "number" && ev.sse_seq > after) {
               after = ev.sse_seq;
             }
-            if (ev.type === "run_heartbeat") continue;
             gotEvent = true;
             attempt = 0;
+            session.bumpIdle();
+            if (ev.type === "run_heartbeat") {
+              session.enqueue(ev);
+              continue;
+            }
             session.rawEvents.push(ev);
             if (ev.type === "tool_call") {
               const id = typeof ev.call_id === "string" ? ev.call_id : "";
@@ -231,7 +253,8 @@ export function startLiveEventFeeder(client, signal, timeoutMs = 600_000) {
         }
       }
     } finally {
-      clearTimeout(timer);
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = null;
       session.closed = true;
       session.enqueue(null);
     }

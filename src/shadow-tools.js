@@ -13,7 +13,7 @@ import {
   setMcpWireTools,
   shadowToolNames,
 } from "./tool-display.js";
-import { takeToolResult, hasFollowUpText } from "./result-stash.js";
+import { takeToolResult, hasFollowUpText, hasToolResult } from "./result-stash.js";
 import {
   formatToolCallLines,
   formatToolResult,
@@ -33,6 +33,11 @@ const ANY_OBJECT = {
 
 /** Match stock pi bash preview (last N lines + expand hint). */
 const TOOL_PREVIEW_LINES = 5;
+
+/** Match pi_cursor_wire.constants.TOOL_WAIT (shell/VPS wait cap). */
+const STASH_WAIT_MS = 600_000;
+
+const STASH_POLL_MS = 50;
 
 /** @type {Set<string>} */
 const _registeredShadows = new Set();
@@ -108,6 +113,30 @@ function contentToText(content, ok = true) {
 }
 
 /**
+ * Drain waits for tool_executed before toolUse, but a closed feeder / race
+ * can still leave stash empty. Wait while the live SSE session is open
+ * instead of immediately returning "No bridge result".
+ * @param {string} callId
+ * @param {string} displayName
+ * @param {number} [timeoutMs]
+ */
+export async function takeToolResultWhenReady(
+  callId,
+  displayName,
+  timeoutMs = STASH_WAIT_MS
+) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (hasToolResult(callId, displayName)) {
+      return takeToolResult(callId, displayName);
+    }
+    if (!hasActiveLiveRun()) break;
+    await new Promise((r) => setTimeout(r, STASH_POLL_MS));
+  }
+  return takeToolResult(callId, displayName);
+}
+
+/**
  * @param {string} displayName
  */
 function makeShadowTool(displayName) {
@@ -150,7 +179,7 @@ function makeShadowTool(displayName) {
       return panelLinesComponent(["", ...preview], { theme, color });
     },
     async execute(toolCallId, _params, _signal, onUpdate, _ctx) {
-      const stashed = takeToolResult(toolCallId, displayName);
+      const stashed = await takeToolResultWhenReady(toolCallId, displayName);
       // Continue the agent loop while live SSE still has turns, or legacy follow-up.
       const terminate = !hasFollowUpText() && !hasActiveLiveRun();
       if (!stashed) {

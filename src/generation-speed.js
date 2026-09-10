@@ -17,7 +17,7 @@ const STATE_KEY = Symbol.for("pi-cursor-remote.generation-speed.v1");
  * @returns {{
  *   outputTokens: number,
  *   decodeMs: number,
- *   requestRender: (() => void) | null,
+ *   requestRender: ((force?: boolean) => void) | null,
  * }}
  */
 function state() {
@@ -30,6 +30,19 @@ function state() {
     };
   }
   return g[STATE_KEY];
+}
+
+/**
+ * Pi TUI throttles paints; user input uses requestRender(true) and that is
+ * what unsticks a frozen chat. Call with force during long silent waits.
+ * @param {boolean} [force]
+ */
+export function pokeTuiRender(force = false) {
+  try {
+    state().requestRender?.(force);
+  } catch {
+    // ignore
+  }
 }
 
 export function resetGenerationSpeed() {
@@ -168,9 +181,9 @@ export function installGenerationSpeedFooter(ctx) {
 
   ctx.ui.setFooter((tui, theme, footerData) => {
     const s = state();
-    s.requestRender = () => {
+    s.requestRender = (force = false) => {
       try {
-        tui.requestRender?.();
+        tui.requestRender?.(force);
       } catch {
         // ignore
       }

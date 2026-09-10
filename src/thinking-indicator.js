@@ -2,22 +2,96 @@
  * Pi UI helpers: thinking indicator widget + footer status (wire stats).
  */
 
+import { pokeTuiRender } from "./generation-speed.js";
+
 const WIDGET_ID = "cursor-remote-thinking";
 const STATUS_KEY = "cursor-remote-wire";
+const KEEP_ALIVE_MS = 1000;
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let blinkTimer = null;
 
-/** @type {{ setWidget?: Function, setStatus?: Function } | null} */
+/** @type {ReturnType<typeof setInterval> | null} */
+let keepAliveTimer = null;
+
+/** @type {number | null} */
+let keepAliveStartedAt = null;
+
+/**
+ * @type {{
+ *   setWidget?: Function,
+ *   setStatus?: Function,
+ *   setWorkingMessage?: Function,
+ * } | null}
+ */
 let uiRef = null;
 
 /**
- * @param {{ setWidget?: Function, setStatus?: Function } | null | undefined} ui
+ * @param {{
+ *   setWidget?: Function,
+ *   setStatus?: Function,
+ *   setWorkingMessage?: Function,
+ * } | null | undefined} ui
  */
 export function bindThinkingUi(ui) {
-  if (ui && (typeof ui.setWidget === "function" || typeof ui.setStatus === "function")) {
+  if (
+    ui &&
+    (typeof ui.setWidget === "function" ||
+      typeof ui.setStatus === "function" ||
+      typeof ui.setWorkingMessage === "function")
+  ) {
     uiRef = ui;
   }
+}
+
+/**
+ * @param {number} ms
+ */
+function formatElapsed(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m <= 0) return `${s}s`;
+  return `${m}m ${String(s).padStart(2, "0")}s`;
+}
+
+/**
+ * Force-paint the TUI while a live run is silent (long shell / model think).
+ * Typing in the editor does the same via requestRender(true).
+ */
+export function startLiveRunUiKeepAlive() {
+  stopLiveRunUiKeepAlive();
+  keepAliveStartedAt = Date.now();
+  const tick = () => {
+    const elapsed = Date.now() - (keepAliveStartedAt || Date.now());
+    try {
+      if (typeof uiRef?.setWorkingMessage === "function") {
+        uiRef.setWorkingMessage(`Working ${formatElapsed(elapsed)}`);
+      }
+    } catch {
+      // ignore
+    }
+    pokeTuiRender(true);
+  };
+  tick();
+  keepAliveTimer = setInterval(tick, KEEP_ALIVE_MS);
+}
+
+export function stopLiveRunUiKeepAlive() {
+  if (keepAliveTimer != null) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+  keepAliveStartedAt = null;
+  try {
+    uiRef?.setWorkingMessage?.();
+  } catch {
+    // ignore
+  }
+}
+
+export function pokeUiKeepAlive() {
+  pokeTuiRender(true);
 }
 
 export function clearThinkingIndicator() {

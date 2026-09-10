@@ -24,6 +24,7 @@ import {
   clearThinkingIndicator,
   setWireStatus,
   clearWireStatus,
+  pokeUiKeepAlive,
 } from "./thinking-indicator.js";
 import { tryApplyWireUsage } from "./usage-accounting.js";
 import { wrapToWidth, LINE_BREAK_RE } from "./tui-width.js";
@@ -34,6 +35,7 @@ import {
   isPostToolBoundaryEvent,
   settleToolBatch,
   startLiveEventFeeder,
+  LIVE_RUN_IDLE_MS,
 } from "./live-run.js";
 import { recordDecodeSample } from "./generation-speed.js";
 
@@ -817,6 +819,10 @@ function formatShellResult(o) {
     parts.push(`exit ${o.exit_code}`);
   }
   if (o.timed_out) parts.push("timed out");
+  if (o.timeout_capped && typeof o.timeout_requested === "number") {
+    const cap = typeof o.timeout === "number" ? o.timeout : o.timeout_s;
+    parts.push(`timeout capped to ${cap}s (requested ${o.timeout_requested}s)`);
+  }
   if (typeof o.error === "string" && o.error) parts.push(o.error);
   return parts.join("\n");
 }
@@ -932,7 +938,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const session = startLiveEventFeeder(
     client,
     opts.signal,
-    opts.timeoutMs ?? 600_000
+    opts.timeoutMs ?? LIVE_RUN_IDLE_MS
   );
   const onPromptAbort = () => {
     if (typeof session.requestCancel === "function") session.requestCancel();
@@ -1397,6 +1403,8 @@ async function drainLiveRunTurn(opts = {}) {
       } else if (phase === "sent") {
         appendStatusLine("[cancel] sending…");
       }
+    } else if (ev.type === "run_heartbeat") {
+      pokeUiKeepAlive();
     } else if (ev.type === "session_end") {
       endThinkingBlock();
       notifyIndicator(false);
@@ -1411,7 +1419,14 @@ async function drainLiveRunTurn(opts = {}) {
       const ev = await session.nextEvent();
       if (!ev) {
         flushDeferredBoundary();
-        if (toolsThisTurn > 0) {
+        if (toolsThisTurn > 0 && pendingExec.size > 0) {
+          if (session.error) {
+            output.errorMessage = session.error.message;
+            finishTurn("error");
+          } else {
+            finishTurn("toolUse");
+          }
+        } else if (toolsThisTurn > 0) {
           finishTurn("toolUse");
         } else if (session.error) {
           output.errorMessage = session.error.message;

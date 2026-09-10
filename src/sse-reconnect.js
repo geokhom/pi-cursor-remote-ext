@@ -15,7 +15,7 @@ export function isReconnectableSseError(err, userSignal) {
   if (userSignal && userSignal.aborted) return false;
   const name =
     err && typeof err === "object" && "name" in err ? String(err.name) : "";
-  // Feeder AbortController (10m timer / dispose) — do not reconnect.
+  // Feeder AbortController (idle timer / dispose) — do not reconnect.
   if (name === "AbortError") return false;
   const msg = err instanceof Error ? err.message : String(err ?? "");
   const code =

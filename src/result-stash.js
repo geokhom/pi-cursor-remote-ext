@@ -122,6 +122,28 @@ export function peekToolResult(callId) {
   return state().stash.get(callId);
 }
 
+/**
+ * True if stash already has a result for this call (do not consume).
+ * @param {string} [callId]
+ * @param {string} [displayName]
+ */
+export function hasToolResult(callId, displayName) {
+  const s = state();
+  if (callId && s.stash.has(callId)) return true;
+  if (!displayName) return false;
+  const q = s.idsByName.get(displayName);
+  if (q) {
+    for (const id of q) {
+      if (id && s.stash.has(id)) return true;
+    }
+  }
+  for (const v of s.stash.values()) {
+    const dn = v.displayName || (v.name ? stripContour(v.name) : "");
+    if (dn === displayName) return true;
+  }
+  return false;
+}
+
 export function clearToolResults() {
   const s = state();
   s.stash.clear();
