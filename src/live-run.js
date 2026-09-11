@@ -45,6 +45,7 @@ export const TOOL_BATCH_SETTLE_MS = 75;
  * @property {() => void} dispose
  * @property {() => void} markFirstOut
  * @property {() => void} [bumpIdle]
+ * @property {boolean} [abandoned] bridge idle (or /stop) tore down this feeder
  */
 
 /**
@@ -75,6 +76,7 @@ export function hasActiveLiveRun() {
 export function clearLiveRun() {
   const st = state();
   if (st.session) {
+    st.session.abandoned = true;
     st.session.dispose();
     st.session = null;
   }
@@ -95,13 +97,22 @@ export function setActiveLiveRun(session) {
 /** Idle abort after last SSE event. Must exceed TOOL_WAIT (600s). */
 export const LIVE_RUN_IDLE_MS = 900_000;
 
+/** How often to ask GET /session whether the bridge still has a run. */
+export const LIVE_RUN_BRIDGE_IDLE_MS = 1500;
+
 /**
  * @param {import("./bridge-client.js").BridgeClient} client
  * @param {AbortSignal} [signal]
  * @param {number} [timeoutMs]
+ * @param {{ idleCheckMs?: number }} [opts]
  * @returns {LiveRunSession}
  */
-export function startLiveEventFeeder(client, signal, timeoutMs = LIVE_RUN_IDLE_MS) {
+export function startLiveEventFeeder(
+  client,
+  signal,
+  timeoutMs = LIVE_RUN_IDLE_MS,
+  opts = {}
+) {
   clearLiveRun();
 
   const abort = new AbortController();
@@ -121,6 +132,7 @@ export function startLiveEventFeeder(client, signal, timeoutMs = LIVE_RUN_IDLE_M
     rawEvents: [],
     firstOutAt: null,
     decodeSampleRecorded: false,
+    abandoned: false,
     abort,
     timer: null,
     bumpIdle() {
@@ -185,6 +197,37 @@ export function startLiveEventFeeder(client, signal, timeoutMs = LIVE_RUN_IDLE_M
   setActiveLiveRun(session);
   startLiveRunUiKeepAlive();
 
+  const idleCheckMs = opts.idleCheckMs ?? LIVE_RUN_BRIDGE_IDLE_MS;
+  let sawBridgeRun = false;
+
+  (async function watchBridgeIdle() {
+    while (!abort.signal.aborted && !session.closed) {
+      await sleepAbortable(idleCheckMs, abort.signal);
+      if (abort.signal.aborted || session.closed) return;
+      if (session.queue.length > 0) continue;
+      if (typeof client.getSession !== "function") continue;
+      try {
+        const snap = await client.getSession();
+        if (snap?.run_active || snap?.summarize_active) {
+          sawBridgeRun = true;
+          continue;
+        }
+        if (!snap || snap.ok === false) continue;
+        // Do not kill the feeder in the gap before POST /prompt sets run_active.
+        if (!sawBridgeRun) continue;
+        session.abandoned = true;
+        if (state().session === session) {
+          clearLiveRun();
+        } else {
+          session.dispose();
+        }
+        return;
+      } catch {
+        // Bridge briefly unreachable — keep waiting on SSE.
+      }
+    }
+  })();
+
   (async () => {
     let after = 0;
     let attempt = 0;
@@ -203,6 +246,7 @@ export function startLiveEventFeeder(client, signal, timeoutMs = LIVE_RUN_IDLE_M
             gotEvent = true;
             attempt = 0;
             session.bumpIdle();
+            if (ev.type !== "sse_reconnect") sawBridgeRun = true;
             if (ev.type === "run_heartbeat") {
               session.enqueue(ev);
               continue;

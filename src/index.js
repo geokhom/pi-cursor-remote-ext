@@ -23,6 +23,7 @@ import {
   resumeBridgeLiveTurn,
   runPromptViaBridgeComplete,
   hasActiveLiveRun,
+  clearLiveRun,
   grantsFromEnv,
   emptyUsage,
   handshakeWorkspaceCwd,
@@ -53,6 +54,7 @@ import {
   createLocalStream,
   isSideChannelCompletion,
   lastUserText,
+  isNewUserTurn,
   runSummarizationViaBridge,
 } from "./compaction.js";
 import { registerCursorRemoteCompatApi } from "./compat-api.js";
@@ -292,11 +294,15 @@ function streamSimple(model, context, options) {
       };
 
       // Resume open SSE after toolUse (stock pi-cursor-sdk live-run pattern).
-      if (hasActiveLiveRun()) {
+      // A leftover feeder with no VPS run must not swallow a newly typed prompt.
+      if (hasActiveLiveRun() && !isNewUserTurn(context)) {
         await resumeBridgeLiveTurn(streamOpts);
         stream.end();
         clearThinkingIndicator();
         return;
+      }
+      if (hasActiveLiveRun()) {
+        clearLiveRun();
       }
 
       const text = lastUserText(context);
@@ -560,6 +566,12 @@ export default async function register(pi) {
           );
         } else if (json.cancelled) {
           ctx?.ui?.notify?.("Queued prompts dropped (no in-flight run).", "info");
+        } else if (hasActiveLiveRun()) {
+          clearLiveRun();
+          ctx?.ui?.notify?.(
+            "No Cursor run on the bridge — cleared stuck Working state.",
+            "info"
+          );
         } else {
           ctx?.ui?.notify?.("No in-flight Cursor run to cancel.", "info");
         }
@@ -591,6 +603,7 @@ export {
   resumeBridgeLiveTurn,
   runPromptViaBridgeComplete,
   hasActiveLiveRun,
+  clearLiveRun,
   streamSimple,
   grantsFromEnv,
   emptyUsage,
@@ -602,6 +615,7 @@ export {
   isSideChannelCompletion,
   isSummarizationRequest,
   lastUserText,
+  isNewUserTurn,
   runSummarizationViaBridge,
   summarizationPromptFromContext,
 } from "./compaction.js";

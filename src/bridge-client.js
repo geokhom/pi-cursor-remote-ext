@@ -917,11 +917,12 @@ export function emptyUsage() {
  *   model?: { id?: string, api?: string, provider?: string, contextWindow?: number, maxTokens?: number },
  *   modelSelection?: { id: string, params?: Array<{id:string,value:string}> },
  *   thinkingDisplay?: "off"|"indicator"|"full",
- *   wireStats?: "session"|"request",
- *   onThinkingIndicator?: (active: boolean) => void,
- *   mode?: "summarize",
- *   rejectTools?: boolean,
- * }} [opts]
+   *   wireStats?: "session"|"request",
+   *   onThinkingIndicator?: (active: boolean) => void,
+   *   mode?: "summarize",
+   *   rejectTools?: boolean,
+   *   idleCheckMs?: number,
+   * }} [opts]
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
   clearToolResults();
@@ -938,7 +939,8 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const session = startLiveEventFeeder(
     client,
     opts.signal,
-    opts.timeoutMs ?? LIVE_RUN_IDLE_MS
+    opts.timeoutMs ?? LIVE_RUN_IDLE_MS,
+    opts.idleCheckMs != null ? { idleCheckMs: opts.idleCheckMs } : {}
   );
   const onPromptAbort = () => {
     if (typeof session.requestCancel === "function") session.requestCancel();
@@ -1384,7 +1386,7 @@ async function drainLiveRunTurn(opts = {}) {
       } else {
         output.errorMessage = ev.message ? `${kind}: ${ev.message}` : kind;
       }
-    } else if (ev.type === "downlink_resync" || ev.type === "uplink_retry" || ev.type === "sse_reconnect") {
+    } else if (ev.type === "downlink_resync" || ev.type === "uplink_retry" || ev.type === "sse_reconnect" || ev.type === "session_reopen") {
       endThinkingBlock();
       const line =
         (typeof ev.message === "string" && ev.message) ||
@@ -1392,7 +1394,9 @@ async function drainLiveRunTurn(opts = {}) {
           ? "[wire] Uplink retry…"
           : ev.type === "sse_reconnect"
             ? "[wire] SSE reconnecting…"
-            : "[wire] Downlink catch-up: skipped a stuck packet; session kept.");
+            : ev.type === "session_reopen"
+              ? "[wire] VPS session lost; reconnecting…"
+              : "[wire] Downlink catch-up: skipped a stuck packet; session kept.");
       appendStatusLine(line);
     } else if (ev.type === "cancel_ack") {
       const phase = ev.phase || "";
@@ -1409,8 +1413,15 @@ async function drainLiveRunTurn(opts = {}) {
       endThinkingBlock();
       notifyIndicator(false);
       output.stopReason = "error";
-      const detail = ev.detail ? `:${ev.detail}` : "";
-      output.errorMessage = `session_end:${ev.reason || ""}${detail}`;
+      if (ev.reason === "version_mismatch") {
+        output.errorMessage =
+          (typeof ev.message === "string" && ev.message.trim()) ||
+          `Incompatible versions (${ev.detail || "bridge vs relay"}). ` +
+            "Update contour-bridge zip and VPS together.";
+      } else {
+        const detail = ev.detail ? `:${ev.detail}` : "";
+        output.errorMessage = `session_end:${ev.reason || ""}${detail}`;
+      }
     }
   }
 
@@ -1419,6 +1430,10 @@ async function drainLiveRunTurn(opts = {}) {
       const ev = await session.nextEvent();
       if (!ev) {
         flushDeferredBoundary();
+        if (session.abandoned) {
+          finishTurn("stop");
+          break;
+        }
         if (toolsThisTurn > 0 && pendingExec.size > 0) {
           if (session.error) {
             output.errorMessage = session.error.message;

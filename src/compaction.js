@@ -92,6 +92,19 @@ export function lastUserText(context) {
 }
 
 /**
+ * True when this streamSimple is a freshly typed user message, not a tool-loop
+ * resume (last message is a toolResult / assistant). A leftover live-run SSE
+ * must not swallow that text via resumeBridgeLiveTurn.
+ *
+ * @param {object | undefined} context
+ */
+export function isNewUserTurn(context) {
+  const messages = context?.messages || [];
+  const last = messages[messages.length - 1];
+  return last?.role === "user";
+}
+
+/**
  * @param {object | undefined} context
  */
 export function summarizationPromptFromContext(context) {
