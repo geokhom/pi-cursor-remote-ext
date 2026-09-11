@@ -56,8 +56,10 @@ function formatElapsed(ms) {
 }
 
 /**
- * Force-paint the TUI while a live run is silent (long shell / model think).
- * Typing in the editor does the same via requestRender(true).
+ * Keep the Working line moving while a live run is silent (long shell / think).
+ * Must not requestRender(true): pi-tui treats force as a full redraw that
+ * clears terminal scrollback (WezTerm mouse-wheel history jumps to chat start).
+ * Working's Loader already paints on a throttle; this tick is a backup poke.
  */
 export function startLiveRunUiKeepAlive() {
   stopLiveRunUiKeepAlive();
@@ -71,7 +73,7 @@ export function startLiveRunUiKeepAlive() {
     } catch {
       // ignore
     }
-    pokeTuiRender(true);
+    pokeTuiRender();
   };
   tick();
   keepAliveTimer = setInterval(tick, KEEP_ALIVE_MS);
@@ -91,7 +93,7 @@ export function stopLiveRunUiKeepAlive() {
 }
 
 export function pokeUiKeepAlive() {
-  pokeTuiRender(true);
+  pokeTuiRender();
 }
 
 export function clearThinkingIndicator() {

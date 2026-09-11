@@ -33,8 +33,9 @@ function state() {
 }
 
 /**
- * Pi TUI throttles paints; user input uses requestRender(true) and that is
- * what unsticks a frozen chat. Call with force during long silent waits.
+ * Pi TUI throttles paints (~16ms). Keep-alive and heartbeats must omit force:
+ * requestRender(true) resetRenderState()s and main-screen fullRedraws with
+ * CSI 3J (wipe WezTerm scrollback). User typing still uses force inside Pi.
  * @param {boolean} [force]
  */
 export function pokeTuiRender(force = false) {
