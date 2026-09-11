@@ -940,7 +940,10 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     client,
     opts.signal,
     opts.timeoutMs ?? LIVE_RUN_IDLE_MS,
-    opts.idleCheckMs != null ? { idleCheckMs: opts.idleCheckMs } : {}
+    {
+      ...(opts.idleCheckMs != null ? { idleCheckMs: opts.idleCheckMs } : {}),
+      channel: opts.mode === "summarize" ? "summarize" : "coding",
+    }
   );
   const onPromptAbort = () => {
     if (typeof session.requestCancel === "function") session.requestCancel();

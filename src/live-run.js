@@ -101,10 +101,34 @@ export const LIVE_RUN_IDLE_MS = 900_000;
 export const LIVE_RUN_BRIDGE_IDLE_MS = 1500;
 
 /**
+ * Sidecar summarize shares local GET /events with the coding sid. Tag
+ * `channel=summarize` so a coding feeder does not paint Hermes JSON as chat.
+ * Untagged events are coding (old bridges).
+ * @param {object | null | undefined} ev
+ * @returns {"coding"|"summarize"}
+ */
+export function sseEventChannel(ev) {
+  if (ev && typeof ev === "object" && ev.channel === "summarize") {
+    return "summarize";
+  }
+  return "coding";
+}
+
+/**
+ * @param {object | null | undefined} ev
+ * @param {"coding"|"summarize"} [wanted]
+ */
+export function shouldAcceptSseEvent(ev, wanted = "coding") {
+  if (!ev || typeof ev !== "object") return false;
+  if (ev.type === "sse_reconnect") return true;
+  return sseEventChannel(ev) === wanted;
+}
+
+/**
  * @param {import("./bridge-client.js").BridgeClient} client
  * @param {AbortSignal} [signal]
  * @param {number} [timeoutMs]
- * @param {{ idleCheckMs?: number }} [opts]
+ * @param {{ idleCheckMs?: number, channel?: "coding"|"summarize" }} [opts]
  * @returns {LiveRunSession}
  */
 export function startLiveEventFeeder(
@@ -198,6 +222,7 @@ export function startLiveEventFeeder(
   startLiveRunUiKeepAlive();
 
   const idleCheckMs = opts.idleCheckMs ?? LIVE_RUN_BRIDGE_IDLE_MS;
+  const wantedChannel = opts.channel === "summarize" ? "summarize" : "coding";
   let sawBridgeRun = false;
 
   (async function watchBridgeIdle() {
@@ -208,7 +233,12 @@ export function startLiveEventFeeder(
       if (typeof client.getSession !== "function") continue;
       try {
         const snap = await client.getSession();
-        if (snap?.run_active || snap?.summarize_active) {
+        if (wantedChannel === "summarize") {
+          if (snap?.summarize_active) {
+            sawBridgeRun = true;
+            continue;
+          }
+        } else if (snap?.run_active) {
           sawBridgeRun = true;
           continue;
         }
@@ -243,6 +273,7 @@ export function startLiveEventFeeder(
             if (typeof ev.sse_seq === "number" && ev.sse_seq > after) {
               after = ev.sse_seq;
             }
+            if (!shouldAcceptSseEvent(ev, wantedChannel)) continue;
             gotEvent = true;
             attempt = 0;
             session.bumpIdle();
