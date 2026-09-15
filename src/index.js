@@ -567,7 +567,7 @@ export default async function register(pi) {
         } else if (json.cancelled) {
           ctx?.ui?.notify?.("Queued prompts dropped (no in-flight run).", "info");
         } else if (hasActiveLiveRun()) {
-          clearLiveRun();
+          clearLiveRun("coding");
           ctx?.ui?.notify?.(
             "No Cursor run on the bridge — cleared stuck Working state.",
             "info"

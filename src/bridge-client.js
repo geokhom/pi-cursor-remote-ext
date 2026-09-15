@@ -35,6 +35,7 @@ import {
   isPostToolBoundaryEvent,
   settleToolBatch,
   startLiveEventFeeder,
+  waitWhileSummarizeBusy,
   LIVE_RUN_IDLE_MS,
 } from "./live-run.js";
 import { recordDecodeSample } from "./generation-speed.js";
@@ -929,7 +930,11 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   setFollowUp(null);
   clearThinkingIndicator();
   clearWireStatus();
-  clearLiveRun();
+  const channel = opts.mode === "summarize" ? "summarize" : "coding";
+  if (channel === "coding") {
+    await waitWhileSummarizeBusy(client, opts.signal);
+  }
+  clearLiveRun(channel);
 
   let grants = [];
   if (opts.applyGrants !== false) {
@@ -968,6 +973,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
 
   const result = await drainLiveRunTurn({
     ...opts,
+    channel,
     _promptChars: typeof text === "string" ? text.length : 0,
   });
   return { ...result, grants };
@@ -1007,7 +1013,8 @@ export { hasActiveLiveRun, getActiveLiveRun, clearLiveRun };
  * @param {Parameters<typeof runPromptViaBridge>[2] & { _promptChars?: number }} opts
  */
 async function drainLiveRunTurn(opts = {}) {
-  const session = getActiveLiveRun();
+  const channel = opts.channel === "summarize" ? "summarize" : "coding";
+  const session = getActiveLiveRun(channel);
   if (!session) {
     throw new Error("no active bridge live run");
   }
@@ -1271,12 +1278,12 @@ async function drainLiveRunTurn(opts = {}) {
     output.stopReason = reason;
     if (reason === "error" || reason === "aborted") {
       setFollowUp(null);
-      clearLiveRun();
+      clearLiveRun(channel);
       stream.push({ type: "error", reason, error: output });
     } else {
       stream.push({ type: "done", reason, message: output });
       if (reason === "stop") {
-        clearLiveRun();
+        clearLiveRun(channel);
       }
     }
     stream.end();

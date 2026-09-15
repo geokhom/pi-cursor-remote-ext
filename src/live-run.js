@@ -20,7 +20,7 @@ import {
   stopLiveRunUiKeepAlive,
 } from "./thinking-indicator.js";
 
-const STATE_KEY = Symbol.for("pi-cursor-remote.live-run.v1");
+const STATE_KEY = Symbol.for("pi-cursor-remote.live-run.v2");
 
 /** Settle window to gather parallel tool_call events (ms). */
 export const TOOL_BATCH_SETTLE_MS = 75;
@@ -46,52 +46,90 @@ export const TOOL_BATCH_SETTLE_MS = 75;
  * @property {() => void} markFirstOut
  * @property {() => void} [bumpIdle]
  * @property {boolean} [abandoned] bridge idle (or /stop) tore down this feeder
+ * @property {"coding"|"summarize"} [channel]
  */
 
 /**
- * @returns {{ session: LiveRunSession | null }}
+ * @returns {{ coding: LiveRunSession | null, summarize: LiveRunSession | null }}
  */
 function state() {
   const g = globalThis;
   if (!g[STATE_KEY]) {
-    g[STATE_KEY] = { session: null };
+    g[STATE_KEY] = { coding: null, summarize: null };
   }
   return g[STATE_KEY];
 }
 
-/** @returns {LiveRunSession | null} */
-export function getActiveLiveRun() {
-  return state().session;
+/**
+ * @param {"coding"|"summarize"} [channel]
+ */
+function slotOf(channel = "coding") {
+  return channel === "summarize" ? "summarize" : "coding";
 }
 
-/** True while a bridge run still has (or may get) events to drain. */
-export function hasActiveLiveRun() {
-  const s = state().session;
+/**
+ * @param {LiveRunSession | null} s
+ */
+function slotBusy(s) {
   if (!s) return false;
   if (s.error) return false;
   if (!s.closed) return true;
   return s.queue.length > 0;
 }
 
-export function clearLiveRun() {
+/**
+ * @param {"coding"|"summarize"} [channel]
+ * @returns {LiveRunSession | null}
+ */
+export function getActiveLiveRun(channel = "coding") {
+  return state()[slotOf(channel)];
+}
+
+/** True while a coding bridge run still has (or may get) events to drain.
+ * Hermes/compact summarize uses a separate slot so it cannot look like a
+ * tool-loop resume (that painted operations JSON as the next chat turn).
+ */
+export function hasActiveLiveRun() {
+  return slotBusy(state().coding);
+}
+
+export function hasActiveSummarizeRun() {
+  return slotBusy(state().summarize);
+}
+
+/**
+ * @param {"coding"|"summarize"} [channel]
+ */
+export function clearLiveRun(channel = "coding") {
   const st = state();
-  if (st.session) {
-    st.session.abandoned = true;
-    st.session.dispose();
-    st.session = null;
+  const key = slotOf(channel);
+  const session = st[key];
+  if (session) {
+    session.abandoned = true;
+    session.dispose();
+    st[key] = null;
   }
-  stopLiveRunUiKeepAlive();
+  if (key === "coding") {
+    stopLiveRunUiKeepAlive();
+  }
+}
+
+export function clearAllLiveRuns() {
+  clearLiveRun("summarize");
+  clearLiveRun("coding");
 }
 
 /**
  * @param {LiveRunSession | null} session
+ * @param {"coding"|"summarize"} [channel]
  */
-export function setActiveLiveRun(session) {
+export function setActiveLiveRun(session, channel = "coding") {
   const st = state();
-  if (st.session && st.session !== session) {
-    st.session.dispose();
+  const key = slotOf(channel);
+  if (st[key] && st[key] !== session) {
+    st[key].dispose();
   }
-  st.session = session;
+  st[key] = session;
 }
 
 /** Idle abort after last SSE event. Must exceed TOOL_WAIT (600s). */
@@ -99,6 +137,31 @@ export const LIVE_RUN_IDLE_MS = 900_000;
 
 /** How often to ask GET /session whether the bridge still has a run. */
 export const LIVE_RUN_BRIDGE_IDLE_MS = 1500;
+
+const SUMMARIZE_WAIT_MS = 200;
+
+/**
+ * Coding turns must not start draining while Hermes/compact still owns SSE.
+ * @param {{ getSession?: Function } | null | undefined} client
+ * @param {AbortSignal} [signal]
+ */
+export async function waitWhileSummarizeBusy(client, signal) {
+  while (hasActiveSummarizeRun()) {
+    if (signal?.aborted) throw new Error("aborted");
+    await sleepAbortable(SUMMARIZE_WAIT_MS, signal);
+  }
+  if (!client || typeof client.getSession !== "function") return;
+  for (;;) {
+    if (signal?.aborted) throw new Error("aborted");
+    try {
+      const snap = await client.getSession();
+      if (!snap?.summarize_active) return;
+    } catch {
+      return;
+    }
+    await sleepAbortable(SUMMARIZE_WAIT_MS, signal);
+  }
+}
 
 /**
  * Sidecar summarize shares local GET /events with the coding sid. Tag
@@ -137,7 +200,8 @@ export function startLiveEventFeeder(
   timeoutMs = LIVE_RUN_IDLE_MS,
   opts = {}
 ) {
-  clearLiveRun();
+  const wantedChannel = opts.channel === "summarize" ? "summarize" : "coding";
+  clearLiveRun(wantedChannel);
 
   const abort = new AbortController();
   // User ESC must NOT abort SSE: pi keeps painting while we drain until
@@ -157,6 +221,7 @@ export function startLiveEventFeeder(
     firstOutAt: null,
     decodeSampleRecorded: false,
     abandoned: false,
+    channel: wantedChannel,
     abort,
     timer: null,
     bumpIdle() {
@@ -205,7 +270,9 @@ export function startLiveEventFeeder(
     dispose() {
       if (session.timer) clearTimeout(session.timer);
       session.timer = null;
-      stopLiveRunUiKeepAlive();
+      if (wantedChannel === "coding") {
+        stopLiveRunUiKeepAlive();
+      }
       try {
         abort.abort();
       } catch {
@@ -218,11 +285,12 @@ export function startLiveEventFeeder(
   };
 
   session.bumpIdle();
-  setActiveLiveRun(session);
-  startLiveRunUiKeepAlive();
+  setActiveLiveRun(session, wantedChannel);
+  if (wantedChannel === "coding") {
+    startLiveRunUiKeepAlive();
+  }
 
   const idleCheckMs = opts.idleCheckMs ?? LIVE_RUN_BRIDGE_IDLE_MS;
-  const wantedChannel = opts.channel === "summarize" ? "summarize" : "coding";
   let sawBridgeRun = false;
 
   (async function watchBridgeIdle() {
@@ -246,8 +314,8 @@ export function startLiveEventFeeder(
         // Do not kill the feeder in the gap before POST /prompt sets run_active.
         if (!sawBridgeRun) continue;
         session.abandoned = true;
-        if (state().session === session) {
-          clearLiveRun();
+        if (getActiveLiveRun(wantedChannel) === session) {
+          clearLiveRun(wantedChannel);
         } else {
           session.dispose();
         }
