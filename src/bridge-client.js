@@ -348,7 +348,7 @@ export class BridgeClient {
 
   /**
    * POST /cancel — stop the in-flight VPS run (ESC / /stop). Idempotent.
-   * @param {{ run_id?: string, request_id?: string }} [body]
+   * @param {{ run_id?: string, request_id?: string, mode?: "summarize" }} [body]
    */
   async cancel(body = {}) {
     const payload = JSON.stringify(body || {});
@@ -928,6 +928,7 @@ export function emptyUsage() {
  *   rejectTools?: boolean,
  *   idleCheckMs?: number,
  *   skipPrompt?: boolean,
+ *   skipStart?: boolean,
  *   client?: import("./bridge-client.js").BridgeClient,
  * }} [opts]
  */
@@ -1173,7 +1174,9 @@ async function drainLiveRunTurn(opts = {}) {
   };
   output.usage.input = Math.max(1, Math.ceil(promptChars / 4) || 1);
   output.usage.totalTokens = output.usage.input;
-  stream.push({ type: "start", partial: output });
+  if (!opts.skipStart) {
+    stream.push({ type: "start", partial: output });
+  }
 
   /** @type {number | null} */
   let textIndex = null;

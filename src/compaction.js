@@ -228,6 +228,25 @@ export async function runSummarizationViaBridge(args) {
     context?.thinkingLevel ||
     "off";
   const signal = options?.signal;
+  stream.push({
+    type: "start",
+    partial: {
+      role: "assistant",
+      content: [],
+      api: model?.api || "cursor-remote-bridge",
+      provider: model?.provider || "cursor-remote",
+      model: piModelId,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+      },
+      stopReason: "pending",
+      timestamp: Date.now(),
+    },
+  });
   let busyAttempts = 0;
   const promptOpts = {
     signal,
@@ -243,8 +262,9 @@ export async function runSummarizationViaBridge(args) {
       contextWindow: model?.contextWindow,
       maxTokens: model?.maxTokens,
     },
+    skipStart: true,
     onStreamEvent: (ev) => {
-      if (ev?.type === "_end") return;
+      if (ev?.type === "_end" || ev?.type === "start") return;
       stream.push(ev);
     },
   };

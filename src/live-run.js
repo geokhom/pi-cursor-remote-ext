@@ -295,7 +295,9 @@ export function startLiveEventFeeder(
       }, timeoutMs);
     },
     requestCancel() {
-      return client.cancel().catch(() => {});
+      const body =
+        wantedChannel === "summarize" ? { mode: "summarize" } : {};
+      return client.cancel(body).catch(() => {});
     },
     markFirstOut() {
       if (session.firstOutAt == null) session.firstOutAt = Date.now();
