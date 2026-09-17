@@ -46,6 +46,9 @@ export const TOOL_BATCH_SETTLE_MS = 75;
  * @property {() => void} markFirstOut
  * @property {() => void} [bumpIdle]
  * @property {boolean} [abandoned] bridge idle (or /stop) tore down this feeder
+ * @property {boolean} [fifoPending] a follow-up is queued behind the current run
+ * @property {boolean} [drainBusy] drainLiveRunTurn currently owns this slot
+ * @property {Array<() => void>} [drainWaiters]
  * @property {"coding"|"summarize"} [channel]
  */
 
@@ -95,6 +98,57 @@ export function hasActiveLiveRun() {
 
 export function hasActiveSummarizeRun() {
   return slotBusy(state().summarize);
+}
+
+/**
+ * True when GET /session says another coding turn is queued behind this one.
+ * @param {object | null | undefined} snap
+ */
+export function sessionHasQueuedWork(snap) {
+  if (!snap || typeof snap !== "object") return false;
+  return (Number(snap.fifo_depth) || 0) > 0;
+}
+
+/**
+ * True while the bridge still has a coding run or a queued follow-up.
+ * @param {object | null | undefined} snap
+ */
+export function sessionIsBusy(snap) {
+  return Boolean(snap?.run_active) || sessionHasQueuedWork(snap);
+}
+
+/**
+ * @param {"coding"|"summarize"} [channel]
+ */
+export function isDrainBusy(channel = "coding") {
+  const s = getActiveLiveRun(channel);
+  return Boolean(s && s.drainBusy);
+}
+
+/**
+ * @param {"coding"|"summarize"} [channel]
+ * @param {boolean} busy
+ */
+export function setDrainBusy(channel, busy) {
+  const s = getActiveLiveRun(channel);
+  if (!s) return;
+  s.drainBusy = Boolean(busy);
+  if (!busy) {
+    const waiters = Array.isArray(s.drainWaiters) ? s.drainWaiters.splice(0) : [];
+    for (const w of waiters) w();
+  }
+}
+
+/**
+ * Wait until no drainLiveRunTurn owns the slot (or the slot is gone).
+ * @param {"coding"|"summarize"} [channel]
+ * @param {AbortSignal} [signal]
+ */
+export async function waitUntilDrainIdle(channel = "coding", signal) {
+  while (isDrainBusy(channel)) {
+    if (signal?.aborted) throw new Error("aborted");
+    await sleepAbortable(40, signal);
+  }
 }
 
 /**
@@ -217,6 +271,9 @@ export function startLiveEventFeeder(
     error: null,
     awaitingToolExec: new Set(),
     sawRunFinished: false,
+    fifoPending: false,
+    drainBusy: false,
+    drainWaiters: [],
     rawEvents: [],
     firstOutAt: null,
     decodeSampleRecorded: false,
@@ -306,7 +363,7 @@ export function startLiveEventFeeder(
             sawBridgeRun = true;
             continue;
           }
-        } else if (snap?.run_active) {
+        } else if (sessionIsBusy(snap)) {
           sawBridgeRun = true;
           continue;
         }
@@ -350,6 +407,11 @@ export function startLiveEventFeeder(
               session.enqueue(ev);
               continue;
             }
+            if (ev.type === "prompt_queued") {
+              session.fifoPending = true;
+              session.enqueue(ev);
+              continue;
+            }
             session.rawEvents.push(ev);
             if (ev.type === "tool_call") {
               const id = typeof ev.call_id === "string" ? ev.call_id : "";
@@ -357,18 +419,43 @@ export function startLiveEventFeeder(
             } else if (ev.type === "tool_executed") {
               const id = typeof ev.call_id === "string" ? ev.call_id : "";
               if (id) session.awaitingToolExec.delete(id);
+            } else if (ev.type === "run_started") {
+              session.sawRunFinished = false;
+              session.fifoPending = false;
             } else if (ev.type === "run_finished") {
               session.sawRunFinished = true;
             }
             session.enqueue(ev);
-            const terminal =
-              ev.type === "run_error" ||
-              ev.type === "session_end" ||
-              (session.sawRunFinished && session.awaitingToolExec.size === 0);
-            if (terminal) return;
+            const hardTerminal =
+              ev.type === "run_error" || ev.type === "session_end";
+            if (hardTerminal) return;
+            if (session.sawRunFinished && session.awaitingToolExec.size === 0) {
+              if (session.fifoPending) {
+                session.sawRunFinished = false;
+                continue;
+              }
+              let keep = false;
+              if (typeof client.getSession === "function") {
+                try {
+                  const snap = await client.getSession();
+                  keep = sessionHasQueuedWork(snap);
+                } catch {
+                  keep = false;
+                }
+              }
+              if (keep) {
+                session.sawRunFinished = false;
+                continue;
+              }
+              return;
+            }
           }
           if (abort.signal.aborted || session.closed) return;
           if (session.sawRunFinished && session.awaitingToolExec.size === 0) {
+            if (session.fifoPending) {
+              session.sawRunFinished = false;
+              continue;
+            }
             return;
           }
           // Unexpected EOF (Node often surfaces this as Error: aborted).

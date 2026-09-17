@@ -33,12 +33,16 @@ import {
   getActiveLiveRun,
   hasActiveLiveRun,
   isPostToolBoundaryEvent,
+  sessionHasQueuedWork,
+  setDrainBusy,
   settleToolBatch,
   startLiveEventFeeder,
+  waitUntilDrainIdle,
   waitWhileSummarizeBusy,
   LIVE_RUN_IDLE_MS,
 } from "./live-run.js";
 import { recordDecodeSample } from "./generation-speed.js";
+import { sleepAbortable } from "./sse-reconnect.js";
 
 /**
  * True when a thinking-chunk boundary needs an inserted space.
@@ -919,11 +923,13 @@ export function emptyUsage() {
  *   modelSelection?: { id: string, params?: Array<{id:string,value:string}> },
  *   thinkingDisplay?: "off"|"indicator"|"full",
    *   wireStats?: "session"|"request",
-   *   onThinkingIndicator?: (active: boolean) => void,
-   *   mode?: "summarize",
-   *   rejectTools?: boolean,
-   *   idleCheckMs?: number,
-   * }} [opts]
+ *   onThinkingIndicator?: (active: boolean) => void,
+ *   mode?: "summarize",
+ *   rejectTools?: boolean,
+ *   idleCheckMs?: number,
+ *   skipPrompt?: boolean,
+ *   client?: import("./bridge-client.js").BridgeClient,
+ * }} [opts]
  */
 export async function runPromptViaBridge(client, text, opts = {}) {
   clearToolResults();
@@ -934,22 +940,28 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   if (channel === "coding") {
     await waitWhileSummarizeBusy(client, opts.signal);
   }
-  clearLiveRun(channel);
+  if (!opts.skipPrompt) {
+    clearLiveRun(channel);
+  }
 
   let grants = [];
-  if (opts.applyGrants !== false) {
+  if (opts.applyGrants !== false && !opts.skipPrompt) {
     grants = await applyEnvGrants(client, opts.env || process.env);
   }
 
-  const session = startLiveEventFeeder(
-    client,
-    opts.signal,
-    opts.timeoutMs ?? LIVE_RUN_IDLE_MS,
-    {
-      ...(opts.idleCheckMs != null ? { idleCheckMs: opts.idleCheckMs } : {}),
-      channel: opts.mode === "summarize" ? "summarize" : "coding",
-    }
-  );
+  const feederOpts = {
+    ...(opts.idleCheckMs != null ? { idleCheckMs: opts.idleCheckMs } : {}),
+    channel,
+  };
+  let session = getActiveLiveRun(channel);
+  if (!session) {
+    session = startLiveEventFeeder(
+      client,
+      opts.signal,
+      opts.timeoutMs ?? LIVE_RUN_IDLE_MS,
+      feederOpts
+    );
+  }
   const onPromptAbort = () => {
     if (typeof session.requestCancel === "function") session.requestCancel();
   };
@@ -958,15 +970,16 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     else opts.signal.addEventListener("abort", onPromptAbort, { once: true });
   }
   try {
-    await new Promise((r) => setTimeout(r, 30));
-    const model = opts.model || {};
-    const promptChars = typeof text === "string" ? text.length : 0;
-    await client.prompt(text, opts.requestId, {
-      model:
-        opts.modelSelection ||
-        (typeof model.id === "string" ? model.id : undefined),
-      mode: opts.mode,
-    });
+    if (!opts.skipPrompt) {
+      await new Promise((r) => setTimeout(r, 30));
+      const model = opts.model || {};
+      await client.prompt(text, opts.requestId, {
+        model:
+          opts.modelSelection ||
+          (typeof model.id === "string" ? model.id : undefined),
+        mode: opts.mode,
+      });
+    }
   } finally {
     if (opts.signal) opts.signal.removeEventListener("abort", onPromptAbort);
   }
@@ -974,6 +987,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   const result = await drainLiveRunTurn({
     ...opts,
     channel,
+    client,
     _promptChars: typeof text === "string" ? text.length : 0,
   });
   return { ...result, grants };
@@ -988,6 +1002,94 @@ export async function resumeBridgeLiveTurn(opts = {}) {
     throw new Error("no active bridge live run to resume");
   }
   return drainLiveRunTurn(opts);
+}
+
+/**
+ * Typed follow-up while a coding live-run is already painting.
+ * Prefers mid-run ``steer`` (injected:true). Otherwise FIFO — keep the SSE
+ * feeder so the queued turn still streams into this chat bubble.
+ * @param {BridgeClient} client
+ * @param {string} text
+ * @param {Parameters<typeof runPromptViaBridge>[2]} [opts]
+ */
+export async function followUpWhileLiveRun(client, text, opts = {}) {
+  await waitWhileSummarizeBusy(client, opts.signal);
+  const requestId = opts.requestId || `req-${Date.now()}`;
+  const model = opts.model || {};
+  const promptRes = await client.prompt(text, requestId, {
+    model:
+      opts.modelSelection ||
+      (typeof model.id === "string" ? model.id : undefined),
+  });
+  if (promptRes.injected) {
+    emitInjectedAck(opts);
+    return { injected: true, grants: [] };
+  }
+  await waitUntilDrainIdle("coding", opts.signal);
+  await waitForActiveRequest(client, requestId, opts.signal);
+  if (hasActiveLiveRun()) {
+    return resumeBridgeLiveTurn({ ...opts, client, requestId });
+  }
+  return runPromptViaBridge(client, text, {
+    ...opts,
+    requestId,
+    skipPrompt: true,
+    applyGrants: false,
+  });
+}
+
+/**
+ * @param {BridgeClient} client
+ * @param {string} requestId
+ * @param {AbortSignal} [signal]
+ */
+async function waitForActiveRequest(client, requestId, signal) {
+  for (;;) {
+    if (signal?.aborted) throw new Error("aborted");
+    try {
+      const snap = await client.getSession();
+      if (snap?.active_request_id === requestId && snap?.run_active) return;
+      if (!sessionHasQueuedWork(snap)) return;
+    } catch {
+      return;
+    }
+    await sleepAbortable(40, signal);
+  }
+}
+
+/**
+ * @param {Parameters<typeof runPromptViaBridge>[2]} opts
+ */
+function emitInjectedAck(opts) {
+  const model = opts.model || {};
+  const line = "[injected into current run]\n";
+  const output = {
+    role: "assistant",
+    content: [{ type: "text", text: line }],
+    api: model.api || "cursor-remote-bridge",
+    provider: model.provider || "cursor-remote",
+    model: model.id || DEFAULT_MODEL,
+    usage: emptyUsage(),
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+  const push = opts.onStreamEvent;
+  if (typeof push !== "function") return;
+  push({ type: "start", partial: output });
+  push({ type: "text_start", contentIndex: 0, partial: output });
+  push({
+    type: "text_delta",
+    contentIndex: 0,
+    delta: line,
+    partial: output,
+  });
+  push({
+    type: "text_end",
+    contentIndex: 0,
+    content: line,
+    partial: output,
+  });
+  push({ type: "done", reason: "stop", message: output });
 }
 
 /**
@@ -1018,6 +1120,7 @@ async function drainLiveRunTurn(opts = {}) {
   if (!session) {
     throw new Error("no active bridge live run");
   }
+  setDrainBusy(channel, true);
 
   const onResumeAbort = () => {
     if (typeof session.requestCancel === "function") session.requestCancel();
@@ -1268,8 +1371,10 @@ async function drainLiveRunTurn(opts = {}) {
     });
   };
 
-  /** @param {string} reason */
-  const finishTurn = (reason) => {
+  /** @param {string} reason
+   *  @param {{ keepFeeder?: boolean }} [extra]
+   */
+  const finishTurn = (reason, extra = {}) => {
     if (finished) return;
     finished = true;
     endThinkingBlock();
@@ -1283,7 +1388,8 @@ async function drainLiveRunTurn(opts = {}) {
     } else {
       stream.push({ type: "done", reason, message: output });
       if (reason === "stop") {
-        clearLiveRun(channel);
+        const keep = extra.keepFeeder || session.fifoPending;
+        if (!keep) clearLiveRun(channel);
       }
     }
     stream.end();
@@ -1519,7 +1625,16 @@ async function drainLiveRunTurn(opts = {}) {
       }
 
       if (ev.type === "run_finished") {
-        finishTurn(toolsThisTurn > 0 ? "toolUse" : "stop");
+        let keep = Boolean(session.fifoPending);
+        const client = opts.client;
+        if (!keep && client && typeof client.getSession === "function") {
+          try {
+            keep = sessionHasQueuedWork(await client.getSession());
+          } catch {
+            keep = false;
+          }
+        }
+        finishTurn(toolsThisTurn > 0 ? "toolUse" : "stop", { keepFeeder: keep });
         break;
       }
     }
@@ -1532,6 +1647,7 @@ async function drainLiveRunTurn(opts = {}) {
       finishTurn("error");
     }
   } finally {
+    setDrainBusy(channel, false);
     if (opts.signal) opts.signal.removeEventListener("abort", onResumeAbort);
   }
 

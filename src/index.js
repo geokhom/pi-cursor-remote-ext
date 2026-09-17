@@ -21,6 +21,7 @@ import {
   BridgeClient,
   runPromptViaBridge,
   resumeBridgeLiveTurn,
+  followUpWhileLiveRun,
   runPromptViaBridgeComplete,
   hasActiveLiveRun,
   clearLiveRun,
@@ -295,16 +296,6 @@ function streamSimple(model, context, options) {
 
       // Resume open SSE after toolUse (stock pi-cursor-sdk live-run pattern).
       // A leftover feeder with no VPS run must not swallow a newly typed prompt.
-      if (hasActiveLiveRun() && !isNewUserTurn(context)) {
-        await resumeBridgeLiveTurn(streamOpts);
-        stream.end();
-        clearThinkingIndicator();
-        return;
-      }
-      if (hasActiveLiveRun()) {
-        clearLiveRun();
-      }
-
       const text = lastUserText(context);
       if (!text) {
         throw new Error("no user text in context");
@@ -315,6 +306,23 @@ function streamSimple(model, context, options) {
           throw new Error("v1 uplink is text-only; image attachments rejected");
         }
       }
+
+      if (hasActiveLiveRun() && !isNewUserTurn(context)) {
+        await resumeBridgeLiveTurn(streamOpts);
+        stream.end();
+        clearThinkingIndicator();
+        return;
+      }
+      if (hasActiveLiveRun() && isNewUserTurn(context)) {
+        await followUpWhileLiveRun(client, text, streamOpts);
+        stream.end();
+        clearThinkingIndicator();
+        return;
+      }
+      if (hasActiveLiveRun()) {
+        clearLiveRun();
+      }
+
       const env = { ...process.env };
       if (!grantsFromEnv(env).length && conn.grants?.length) {
         env.BRIDGE_GRANTS = conn.grants.join(",");
