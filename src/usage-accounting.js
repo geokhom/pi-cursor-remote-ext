@@ -130,3 +130,40 @@ export function tryApplyWireUsage(partial, wireUsage, model) {
   applyCursorSdkUsage(partial, turn);
   return true;
 }
+
+/**
+ * Per-request line matching local Cursor SDK / pi-cursor-sdk after a turn:
+ * ``TPS 17.7 tok/s. out 187, in 10,367, cache r/w 3,470/0, total 14,024, 10.6s``
+ *
+ * @param {{
+ *   usage?: { input?: number, output?: number, cacheRead?: number, cacheWrite?: number, totalTokens?: number },
+ *   durationMs?: number,
+ * }} args
+ * @returns {string}
+ */
+export function formatRequestStatsLine(args = {}) {
+  const u = args.usage && typeof args.usage === "object" ? args.usage : {};
+  const out = Math.max(0, Math.floor(Number(u.output) || 0));
+  const input = Math.max(0, Math.floor(Number(u.input) || 0));
+  const cacheRead = Math.max(0, Math.floor(Number(u.cacheRead) || 0));
+  const cacheWrite = Math.max(0, Math.floor(Number(u.cacheWrite) || 0));
+  let total = Math.floor(Number(u.totalTokens) || 0);
+  if (!(total > 0)) total = input + out + cacheRead + cacheWrite;
+  const ms = Math.max(0, Math.floor(Number(args.durationMs) || 0));
+  if (out <= 0 && input <= 0 && total <= 0 && ms <= 0) return "";
+  const fmt = (n) => n.toLocaleString("en-US");
+  const rest = [
+    `out ${fmt(out)}`,
+    `in ${fmt(input)}`,
+    `cache r/w ${fmt(cacheRead)}/${fmt(cacheWrite)}`,
+    `total ${fmt(total)}`,
+  ];
+  if (ms > 0) rest.push(`${(ms / 1000).toFixed(1)}s`);
+  const body = rest.join(", ");
+  if (ms > 0 && out > 0) {
+    const tps = (out * 1000) / ms;
+    const rate = tps < 100 ? tps.toFixed(1) : String(Math.round(tps));
+    return `TPS ${rate} tok/s. ${body}`;
+  }
+  return body;
+}

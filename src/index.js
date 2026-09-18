@@ -672,7 +672,7 @@ export {
   modelsCachePath,
   advertisedContextWindow,
 } from "./model-discovery.js";
-export { tryApplyWireUsage, applyCursorSdkUsage } from "./usage-accounting.js";
+export { tryApplyWireUsage, applyCursorSdkUsage, formatRequestStatsLine } from "./usage-accounting.js";
 export {
   recordDecodeSample,
   resetGenerationSpeed,
