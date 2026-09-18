@@ -91,6 +91,42 @@ export function lastUserText(context) {
   return "";
 }
 
+/** Match local-bridge sidecar cap (chars). */
+export const SUMMARIZE_TEXT_MAX = 512_000;
+const SUMMARIZE_HEAD_KEEP = 12_000;
+const SUMMARIZE_TRUNC_MARKER = "\n\n[truncated for summarization]\n";
+
+function looksLikeHermesOperations(text) {
+  const head = String(text || "")
+    .slice(0, 8000)
+    .toLowerCase();
+  return (
+    head.includes("do not call tools") ||
+    head.includes('"operations"') ||
+    head.includes("'operations'")
+  );
+}
+
+/**
+ * Fit a Hermes/compact dump so POST /prompt stays under the bridge body cap.
+ * Keep the operations-schema head and the recent transcript tail.
+ *
+ * @param {string} text
+ * @param {number} [limit]
+ */
+export function truncateSummarizeText(text, limit = SUMMARIZE_TEXT_MAX) {
+  if (typeof text !== "string" || text.length <= limit) return text;
+  const budget = Math.max(0, limit - SUMMARIZE_TRUNC_MARKER.length);
+  if (looksLikeHermesOperations(text)) {
+    const headN = Math.min(SUMMARIZE_HEAD_KEEP, Math.floor(budget / 4));
+    const head = text.slice(0, headN);
+    const tailN = budget - head.length;
+    const tail = tailN > 0 ? text.slice(-tailN) : "";
+    return head + SUMMARIZE_TRUNC_MARKER + tail;
+  }
+  return SUMMARIZE_TRUNC_MARKER + text.slice(-budget);
+}
+
 /**
  * True when this streamSimple is a freshly typed user message, not a tool-loop
  * resume (last message is a toolResult / assistant). A leftover live-run SSE
@@ -204,7 +240,7 @@ export function createLocalStream() {
  */
 export async function runSummarizationViaBridge(args) {
   const { model, context, options, stream } = args;
-  const text = summarizationPromptFromContext(context);
+  const text = truncateSummarizeText(summarizationPromptFromContext(context));
   if (!text) {
     throw new Error("no summarization text in context");
   }
