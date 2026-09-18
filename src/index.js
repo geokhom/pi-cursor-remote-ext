@@ -59,6 +59,7 @@ import {
   runSummarizationViaBridge,
 } from "./compaction.js";
 import { registerCursorRemoteCompatApi } from "./compat-api.js";
+import { separateRequestStatsMarkdown } from "./usage-accounting.js";
 
 /** @type {import('./types.js').ExtensionAPI | null} */
 let _piRef = null;
@@ -380,6 +381,11 @@ export default async function register(pi) {
   // Register immediately so pi TUI has a model + slash commands even if the
   // bridge GET /models hangs (no HTTP timeout on the client).
   registerCursorRemoteProvider(pi, models);
+  if (typeof pi.registerMarkdownTransformer === "function") {
+    pi.registerMarkdownTransformer((markdown, ctx) =>
+      separateRequestStatsMarkdown(markdown, ctx)
+    );
+  }
   await registerCursorRemoteCompatApi(streamSimple, {
     importMetaUrl: import.meta.url,
   });
@@ -672,7 +678,7 @@ export {
   modelsCachePath,
   advertisedContextWindow,
 } from "./model-discovery.js";
-export { tryApplyWireUsage, applyCursorSdkUsage, formatRequestStatsLine } from "./usage-accounting.js";
+export { tryApplyWireUsage, applyCursorSdkUsage, formatRequestStatsLine, quoteRequestStatsLine, separateRequestStatsMarkdown } from "./usage-accounting.js";
 export {
   recordDecodeSample,
   resetGenerationSpeed,

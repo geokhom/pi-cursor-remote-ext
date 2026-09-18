@@ -26,7 +26,11 @@ import {
   clearWireStatus,
   pokeUiKeepAlive,
 } from "./thinking-indicator.js";
-import { tryApplyWireUsage, formatRequestStatsLine } from "./usage-accounting.js";
+import {
+  tryApplyWireUsage,
+  formatRequestStatsLine,
+  quoteRequestStatsLine,
+} from "./usage-accounting.js";
 import { wrapToWidth, LINE_BREAK_RE } from "./tui-width.js";
 import {
   clearLiveRun,
@@ -1492,7 +1496,8 @@ async function drainLiveRunTurn(opts = {}) {
           usage: output.usage,
           durationMs: Number(ev.duration_ms) || 0,
         });
-        if (stats) appendStatusLine(stats);
+        const quoted = quoteRequestStatsLine(stats);
+        if (quoted) appendStatusLine(`\n${quoted}`);
       }
     } else if (ev.type === "run_error") {
       endThinkingBlock();

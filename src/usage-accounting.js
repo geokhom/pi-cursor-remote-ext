@@ -167,3 +167,55 @@ export function formatRequestStatsLine(args = {}) {
   }
   return body;
 }
+
+const REQUEST_STATS_RE =
+  /^(?:TPS .+ tok\/s\. )?out [\d,]+, in [\d,]+, cache r\/w [\d,]+\/[\d,]+, total [\d,]+(?:, [\d.]+s)?$/;
+
+/**
+ * @param {string} line
+ * @returns {boolean}
+ */
+export function isRequestStatsLine(line) {
+  const s = String(line || "")
+    .trim()
+    .replace(/^>\s*/, "");
+  return Boolean(s) && REQUEST_STATS_RE.test(s);
+}
+
+/**
+ * Markdown blockquote so pi TUI paints mdQuote (gray) + left bar, not model text.
+ * @param {string} line
+ * @returns {string}
+ */
+export function quoteRequestStatsLine(line) {
+  const s = String(line || "")
+    .trim()
+    .replace(/^>\s*/, "");
+  return s ? `> ${s}` : "";
+}
+
+/**
+ * Keep the per-request stats line visually separate from assistant prose:
+ * blank line + blockquote. Also restyles already-saved unquoted lines.
+ *
+ * @param {string} markdown
+ * @param {{ messageType?: string } | undefined} [context]
+ * @returns {string}
+ */
+export function separateRequestStatsMarkdown(markdown, context) {
+  if (context?.messageType && context.messageType !== "assistant") {
+    return markdown;
+  }
+  const text = String(markdown ?? "");
+  const lines = text.split("\n");
+  let i = lines.length - 1;
+  while (i >= 0 && lines[i].trim() === "") i -= 1;
+  if (i < 0 || !isRequestStatsLine(lines[i])) return text;
+  const quoted = quoteRequestStatsLine(lines[i]);
+  if (i > 0 && lines[i - 1].trim() !== "") {
+    lines.splice(i, 0, "");
+    i += 1;
+  }
+  lines[i] = quoted;
+  return lines.join("\n");
+}
