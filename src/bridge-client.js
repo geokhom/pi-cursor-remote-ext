@@ -964,6 +964,7 @@ export async function runPromptViaBridge(client, text, opts = {}) {
     );
   }
   const onPromptAbort = () => {
+    if (channel === "summarize") return;
     if (typeof session.requestCancel === "function") session.requestCancel();
   };
   if (opts.signal) {
@@ -1124,6 +1125,7 @@ async function drainLiveRunTurn(opts = {}) {
   setDrainBusy(channel, true);
 
   const onResumeAbort = () => {
+    if (channel === "summarize") return;
     if (typeof session.requestCancel === "function") session.requestCancel();
   };
   if (opts.signal) {

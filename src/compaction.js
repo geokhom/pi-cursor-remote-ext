@@ -247,9 +247,24 @@ export async function runSummarizationViaBridge(args) {
       timestamp: Date.now(),
     },
   });
+  const SUMMARIZE_KEEPALIVE_MS = 4000;
+  let keepAlive = null;
+  const pokeKeepAlive = () => {
+    stream.push({
+      type: "thinking_delta",
+      delta: "",
+      contentIndex: 0,
+      partial: {
+        role: "assistant",
+        content: [],
+        stopReason: "pending",
+        timestamp: Date.now(),
+      },
+    });
+  };
+  keepAlive = setInterval(pokeKeepAlive, SUMMARIZE_KEEPALIVE_MS);
   let busyAttempts = 0;
   const promptOpts = {
-    signal,
     applyGrants: false,
     thinkingDisplay: "off",
     rejectTools: true,
@@ -268,20 +283,24 @@ export async function runSummarizationViaBridge(args) {
       stream.push(ev);
     },
   };
-  for (;;) {
-    await waitWhileLiveRunActive(signal);
-    try {
-      await runPromptViaBridge(client, text, promptOpts);
-      break;
-    } catch (err) {
-      if (!isBridgeBusyError(err) || signal?.aborted) throw err;
-      busyAttempts += 1;
-      if (!signal && busyAttempts > 3000) throw err;
-      await sleepAbortable(SUMMARIZE_BUSY_RETRY_MS, signal);
-      if (signal?.aborted) throw new Error("aborted");
+  try {
+    for (;;) {
+      await waitWhileLiveRunActive(signal);
+      try {
+        await runPromptViaBridge(client, text, promptOpts);
+        break;
+      } catch (err) {
+        if (!isBridgeBusyError(err) || signal?.aborted) throw err;
+        busyAttempts += 1;
+        if (!signal && busyAttempts > 3000) throw err;
+        await sleepAbortable(SUMMARIZE_BUSY_RETRY_MS, signal);
+        if (signal?.aborted) throw new Error("aborted");
+      }
     }
+    stream.end();
+  } finally {
+    if (keepAlive) clearInterval(keepAlive);
   }
-  stream.end();
 }
 
 export function summarizationErrorMessage(err) {
