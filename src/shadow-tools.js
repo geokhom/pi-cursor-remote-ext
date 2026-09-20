@@ -32,7 +32,9 @@ const ANY_OBJECT = {
 };
 
 /** Match stock pi bash preview (last N lines + expand hint). */
-const TOOL_PREVIEW_LINES = 5;
+const TOOL_PREVIEW_LINES_TAIL = 5;
+/** Match stock pi grep/find/ls (first N lines + expand hint). */
+const TOOL_PREVIEW_LINES_HEAD = 15;
 
 /** Match pi_cursor_wire.constants.TOOL_WAIT (shell/VPS wait cap). */
 const STASH_WAIT_MS = 600_000;
@@ -55,6 +57,34 @@ export function truncateToLastLines(text, maxLines) {
   return {
     lines: lines.slice(-maxLines),
     skipped: lines.length - maxLines,
+  };
+}
+
+/**
+ * Shell: last N lines (pi bash). Grep/find/ls/read/MCP: first N (pi grep/find).
+ * @param {string} displayName
+ * @param {string} text
+ * @param {boolean} [expanded]
+ * @returns {{ lines: string[], skipped: number, fromStart: boolean }}
+ */
+export function previewToolResultLines(displayName, text, expanded = false) {
+  const lines = String(text ?? "").split(/\r\n|\n|\r/);
+  const tail =
+    displayName === "shell" || displayName === "bash";
+  if (expanded) return { lines, skipped: 0, fromStart: !tail };
+  const max = tail ? TOOL_PREVIEW_LINES_TAIL : TOOL_PREVIEW_LINES_HEAD;
+  if (lines.length <= max) return { lines, skipped: 0, fromStart: !tail };
+  if (tail) {
+    return {
+      lines: lines.slice(-max),
+      skipped: lines.length - max,
+      fromStart: false,
+    };
+  }
+  return {
+    lines: lines.slice(0, max),
+    skipped: lines.length - max,
+    fromStart: true,
   };
 }
 
@@ -169,11 +199,18 @@ function makeShadowTool(displayName) {
           maxLines: 80,
         });
       }
-      const { lines: preview, skipped } = truncateToLastLines(text, TOOL_PREVIEW_LINES);
+      const { lines: preview, skipped, fromStart } = previewToolResultLines(
+        displayName,
+        text,
+        false,
+      );
       if (skipped > 0) {
+        const hint = fromStart
+          ? `... (${skipped} more lines, Ctrl+O to expand)`
+          : `... (${skipped} earlier lines, Ctrl+O to expand)`;
         return panelLinesComponent(
-          [`... (${skipped} earlier lines, Ctrl+O to expand)`, ...preview],
-          { theme, color }
+          fromStart ? [...preview, hint] : [hint, ...preview],
+          { theme, color },
         );
       }
       return panelLinesComponent(["", ...preview], { theme, color });

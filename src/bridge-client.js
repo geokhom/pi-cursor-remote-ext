@@ -689,6 +689,470 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
 }
 
 /**
+ * @param {...unknown} vals
+ * @returns {string}
+ */
+function firstNonEmptyString(...vals) {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/**
+ * @param {string} p
+ * @returns {string}
+ */
+function shortenHomePath(p) {
+  if (typeof p !== "string" || !p) return p || "";
+  const home = process.env.HOME;
+  if (
+    home &&
+    (p === home || p.startsWith(`${home}/`) || p.startsWith(`${home}\\`))
+  ) {
+    return `~${p.slice(home.length)}`;
+  }
+  return p;
+}
+
+/**
+ * @param {unknown} pattern
+ * @returns {string}
+ */
+function formatRegexSlash(pattern) {
+  return `/${String(pattern ?? "").replace(/\//g, "\\/")}/`;
+}
+
+/**
+ * @param {string} name
+ * @returns {boolean}
+ */
+function isWebSearchName(name) {
+  return /web_?search/i.test(name);
+}
+
+/**
+ * @param {string} name
+ * @returns {boolean}
+ */
+function isWebFetchName(name) {
+  return /web_?fetch/i.test(name);
+}
+
+/**
+ * One grep/find hit as `path:line:text` (pi grep renderer).
+ * @param {unknown} item
+ * @returns {string}
+ */
+function formatMatchLine(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const o = /** @type {Record<string, unknown>} */ (item);
+  const path = firstNonEmptyString(o.path, o.file, o.filename);
+  const text =
+    typeof o.text === "string"
+      ? o.text
+      : typeof o.content === "string"
+        ? o.content
+        : typeof o.line === "string"
+          ? o.line
+          : "";
+  const lineNo =
+    o.line_number ??
+    o.lineNumber ??
+    (typeof o.line === "number" ? o.line : undefined);
+  if (path && text) {
+    const loc = lineNo != null ? `${path}:${lineNo}:` : `${path}:`;
+    return `${loc}${text}`;
+  }
+  if (path && lineNo != null) return `${path}:${lineNo}`;
+  if (path) return path;
+  if (text) return text;
+  if (typeof o.name === "string") {
+    return o.type === "dir" || o.type === "directory" ? `${o.name}/` : o.name;
+  }
+  return "";
+}
+
+/**
+ * @param {unknown} item
+ * @returns {string}
+ */
+function formatEntryLine(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const o = /** @type {Record<string, unknown>} */ (item);
+  const name = firstNonEmptyString(o.name, o.path);
+  if (!name) return formatMatchLine(item);
+  const isDir =
+    o.type === "dir" || o.type === "directory" || o.is_dir === true;
+  return isDir ? `${name}/` : name;
+}
+
+/**
+ * @param {unknown[]} arr
+ * @returns {string}
+ */
+/**
+ * MCP content blocks: text stays, images/audio become a short omitted note.
+ * @param {unknown} item
+ * @returns {string}
+ */
+function formatMcpContentEntry(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const o = /** @type {Record<string, unknown>} */ (item);
+  const type = typeof o.type === "string" ? o.type : "";
+  if (type === "image") {
+    const mime = firstNonEmptyString(o.mimeType, o.mime, o.mediaType);
+    return mime ? `[image ${mime} omitted]` : "[image omitted]";
+  }
+  if (type === "audio") return "[audio omitted]";
+  if (type === "resource") return "[resource omitted]";
+  if (typeof o.text === "string" && (type === "text" || (type === "" && Object.keys(o).length <= 2))) {
+    return o.text;
+  }
+  return "";
+}
+
+function formatUnknownList(arr) {
+  if (!Array.isArray(arr) || !arr.length) return "";
+  return arr
+    .map((item) => {
+      if (typeof item === "string") return item;
+      const mcp = formatMcpContentEntry(item);
+      if (mcp) return mcp;
+      const line = formatMatchLine(item);
+      if (line) return line;
+      try {
+        return JSON.stringify(item, null, 2);
+      } catch {
+        return String(item);
+      }
+    })
+    .join("\n");
+}
+
+/**
+ * @param {unknown} item
+ * @returns {string}
+ */
+function formatWebResultItem(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const r = /** @type {Record<string, unknown>} */ (item);
+  const title = firstNonEmptyString(r.title, r.name);
+  const url = firstNonEmptyString(r.url, r.href, r.link);
+  const snippet = firstNonEmptyString(r.snippet, r.description, r.text);
+  if (title && url) {
+    return snippet ? `${title}\n${url}\n${snippet}` : `${title}\n${url}`;
+  }
+  if (url) return title ? `${title}\n${url}` : url;
+  const line = formatMatchLine(item);
+  if (line) return line;
+  try {
+    return JSON.stringify(item, null, 2);
+  } catch {
+    return String(item);
+  }
+}
+
+/**
+ * Native-style one-item-per-line bodies (pi grep/find/ls). Empty if not list-like.
+ * @param {Record<string, unknown>} o
+ * @returns {string}
+ */
+function formatListLikeToolResult(o) {
+  if (Array.isArray(o.matches) && o.matches.length) {
+    return formatUnknownList(o.matches);
+  }
+  if (Array.isArray(o.files) && o.files.length) {
+    return formatUnknownList(o.files);
+  }
+  if (Array.isArray(o.paths) && o.paths.length) {
+    return formatUnknownList(o.paths);
+  }
+  if (Array.isArray(o.entries) && o.entries.length) {
+    return o.entries.map(formatEntryLine).filter(Boolean).join("\n");
+  }
+  if (Array.isArray(o.counts) && o.counts.length) {
+    return o.counts
+      .map((row) => {
+        if (!row || typeof row !== "object") return "";
+        const r = /** @type {Record<string, unknown>} */ (row);
+        const path = firstNonEmptyString(r.path, r.file);
+        const n = r.n ?? r.count;
+        return path ? `${path}: ${n ?? 0}` : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (Array.isArray(o.results) && o.results.length) {
+    return o.results.map(formatWebResultItem).filter(Boolean).join("\n\n");
+  }
+  if (Array.isArray(o.output) && o.output.length) {
+    return formatUnknownList(o.output);
+  }
+  if (
+    (Array.isArray(o.matches) && o.matches.length === 0) ||
+    (Array.isArray(o.files) && o.files.length === 0) ||
+    (Array.isArray(o.paths) && o.paths.length === 0)
+  ) {
+    const count =
+      typeof o.count === "number"
+        ? o.count
+        : typeof o.total === "number"
+          ? o.total
+          : 0;
+    if (count === 0) return "(no matches)";
+  }
+  return "";
+}
+
+/**
+ * @param {string} body
+ * @param {Record<string, unknown>} o
+ * @returns {string}
+ */
+function appendTruncatedHint(body, o) {
+  if (o.truncated !== true) return body;
+  const extra =
+    typeof o.max_matches === "number"
+      ? `… (truncated, max ${o.max_matches})`
+      : typeof o.max_paths === "number"
+        ? `… (truncated, max ${o.max_paths})`
+        : typeof o.max_entries === "number"
+          ? `… (truncated, max ${o.max_entries})`
+          : "… (truncated)";
+  return body ? `${body}\n${extra}` : extra;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function prettyJson(value) {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Compact JSON strings (MCP/tool payloads that lost newlines) → list or indent-2.
+ * @param {string} s
+ * @returns {string}
+ */
+function maybeExpandJsonString(s) {
+  if (typeof s !== "string" || s.includes("\n")) return s;
+  const t = s.trim();
+  if (t.length < 2) return s;
+  const objLike =
+    (t.startsWith("{") && t.endsWith("}")) ||
+    (t.startsWith("[") && t.endsWith("]"));
+  if (!objLike) return s;
+  try {
+    const parsed = JSON.parse(t);
+    if (Array.isArray(parsed)) {
+      return formatUnknownList(parsed) || s;
+    }
+    if (parsed && typeof parsed === "object") {
+      const listed = formatListLikeToolResult(
+        /** @type {Record<string, unknown>} */ (parsed),
+      );
+      if (listed) return listed;
+      return prettyJson(parsed);
+    }
+  } catch {
+    return s;
+  }
+  return s;
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string}
+ */
+function truncateArgPreview(value, max = 80) {
+  const t = String(value ?? "");
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/**
+ * MCP / unknown-tool call: name + key=val (pi-cursor-sdk fallback), keep newlines.
+ * @param {string} displayName
+ * @param {Record<string, unknown>} o
+ * @returns {string[]}
+ */
+function formatMcpToolCallLines(displayName, o) {
+  const skip = new Set(["providerIdentifier", "provider_identifier", "toolName", "tool_name", "args"]);
+  const entries = Object.entries(o).filter(([k]) => !skip.has(k));
+  if (!entries.length) return [displayName];
+  /** @type {string[]} */
+  const shortParts = [];
+  /** @type {string[]} */
+  const extraLines = [];
+  const shown = entries.slice(0, 8);
+  for (const [key, value] of shown) {
+    if (value == null) continue;
+    if (typeof value === "string" && LINE_BREAK_RE.test(value)) {
+      extraLines.push(`${key}:`, ...value.split(LINE_BREAK_RE));
+    } else if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      shortParts.push(`${key}=${truncateArgPreview(value)}`);
+    } else if (Array.isArray(value)) {
+      shortParts.push(`${key}=[${value.length}]`);
+    } else if (typeof value === "object") {
+      extraLines.push(`${key}:`, ...prettyJson(value).split("\n"));
+    }
+  }
+  const omitted =
+    entries.length > 8 ? ` (+${entries.length - 8} more)` : "";
+  const header = shortParts.length
+    ? `${displayName} ${shortParts.join(", ")}${omitted}`
+    : `${displayName}${omitted}`;
+  return [header, ...extraLines];
+}
+
+/**
+ * ping/write/edit/mkdir/delete results as short prose (SDK delete/write, not JSON).
+ * @param {Record<string, unknown>} o
+ * @returns {string}
+ */
+function formatMutationToolResult(o) {
+  if (o.pong === true) return "pong";
+  if (o.pong === false) return "pong: false";
+  const path = typeof o.path === "string" ? shortenHomePath(o.path) : "";
+  if (!path) return "";
+  if (
+    "content" in o ||
+    "start_line" in o ||
+    "total_lines" in o ||
+    "file_size" in o ||
+    "end_line" in o
+  ) {
+    return "";
+  }
+  if (typeof o.replacements === "number") {
+    const n = o.replacements;
+    const bytes = typeof o.bytes === "number" ? `, ${o.bytes} bytes` : "";
+    return `Edited ${path} (${n} replacement${n === 1 ? "" : "s"}${bytes})`;
+  }
+  if (typeof o.bytes === "number" && (o.created === true || o.overwritten === true)) {
+    const verb = o.overwritten === true ? "Overwrote" : "Wrote";
+    return `${verb} ${path} (${o.bytes} bytes)`;
+  }
+  if (o.created === true && o.bytes == null && o.deleted == null) {
+    return `Created directory ${path}`;
+  }
+  if (
+    o.deleted === "file" ||
+    o.deleted === "dir" ||
+    o.deleted === "directory" ||
+    o.deleted === true
+  ) {
+    const kind =
+      o.deleted === "dir" || o.deleted === "directory" ? "directory" : "file";
+    return `Deleted ${kind} ${path}`;
+  }
+  return "";
+}
+
+/**
+ * @param {Record<string, unknown>} o
+ * @returns {string}
+ */
+function formatReadFileResult(o) {
+  if (typeof o.content !== "string") return "";
+  if (o.start_line == null && o.total_lines == null && o.file_size == null && o.end_line == null) {
+    return "";
+  }
+  let body = o.content;
+  if (o.truncated === true) {
+    const hint = typeof o.hint === "string" && o.hint ? o.hint : "… (truncated)";
+    body = body ? `${body}\n${hint}` : hint;
+  }
+  return body;
+}
+
+/**
+ * Call headers matching stock pi grep/find/ls and pi-cursor-sdk WebSearch.
+ * @param {string} displayName
+ * @param {Record<string, unknown>} o
+ * @returns {string[] | null}
+ */
+function formatNativeToolCallLines(displayName, o) {
+  const path = firstNonEmptyString(
+    o.path,
+    o.target_file,
+    o.file_path,
+    o.file,
+    o.target_directory,
+  );
+  const pattern = firstNonEmptyString(o.pattern);
+  const glob = firstNonEmptyString(o.glob, o.glob_pattern);
+  const query = firstNonEmptyString(
+    o.search_term,
+    o.searchTerm,
+    o.query,
+    o.q,
+  );
+  const url = firstNonEmptyString(o.url, o.uri, o.href);
+  const homePath = path ? shortenHomePath(path) : "";
+
+  if (displayName === "grep" || displayName === "rg") {
+    const where = homePath || ".";
+    const limit = o.head_limit ?? o.limit;
+    let header = `grep ${formatRegexSlash(pattern)} in ${where}`;
+    if (glob) header += ` (${glob})`;
+    if (limit != null && String(limit).trim() !== "") header += ` limit ${limit}`;
+    return [header];
+  }
+  if (displayName === "glob") {
+    return [`find ${pattern || glob || "*"} in ${homePath || "."}`];
+  }
+  if (displayName === "list_dir" || displayName === "ls") {
+    return [`ls ${homePath || "."}`];
+  }
+  if (displayName === "read_file" || displayName === "read") {
+    let header = `read ${homePath || "?"}`;
+    if (o.offset != null || o.limit != null) {
+      const start = o.offset ?? 1;
+      const end =
+        o.limit != null ? Number(start) + Number(o.limit) - 1 : "";
+      header += `:${start}${end !== "" ? `-${end}` : ""}`;
+    }
+    return [header];
+  }
+  if (displayName === "mkdir") {
+    let header = `mkdir ${homePath || "?"}`;
+    if (o.parents === true) header += " (parents)";
+    return [header];
+  }
+  if (displayName === "delete_path" || displayName === "delete") {
+    return [`delete ${homePath || "?"}`];
+  }
+  if (displayName === "ping") {
+    return ["ping"];
+  }
+  if (isWebSearchName(displayName) && query) {
+    return [`WebSearch ${query}`];
+  }
+  if (isWebFetchName(displayName) && url) {
+    return [`WebFetch ${url}`];
+  }
+  if (displayName.startsWith("mcp__") || displayName.includes("mcp__")) {
+    return formatMcpToolCallLines(displayName, o);
+  }
+  return null;
+}
+
+/**
  * Format contour tool args for TUI (keep newlines; unwrap MCP envelopes).
  * @param {unknown} args
  */
@@ -749,24 +1213,51 @@ export function formatToolCallLines(displayName, args, opts = {}) {
   const maxLines = opts.maxLines ?? TOOL_CALL_PREVIEW_LINES;
   const width = opts.width;
   const o = unwrapToolArgs(args);
+  const native = formatNativeToolCallLines(String(displayName || "tool"), o);
+  if (native) {
+    return layoutToolPanelLines(native, width, { maxLines });
+  }
   const shell = displayName === "shell";
-  const prefix = shell ? "$ " : `$ ${displayName} `;
+  const writeLike = displayName === "write_file" || displayName === "write";
+  const editLike = displayName === "str_replace" || displayName === "edit";
+  const prefix = shell
+    ? "$ "
+    : writeLike
+      ? "write "
+      : editLike
+        ? "edit "
+        : `$ ${displayName} `;
   /** @type {string[]} */
   let logical = [];
   if (typeof o.command === "string") {
     const parts = o.command.split(LINE_BREAK_RE);
     logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
-  } else if (typeof o.path === "string" && typeof o.old_string === "string") {
-    const neu = typeof o.new_string === "string" ? o.new_string : "";
-    const oldLines = o.old_string.split(LINE_BREAK_RE);
+  } else if (
+    typeof o.path === "string" &&
+    (typeof o.old_string === "string" || typeof o.oldString === "string")
+  ) {
+    const oldS =
+      typeof o.old_string === "string" ? o.old_string : String(o.oldString ?? "");
+    const neu =
+      typeof o.new_string === "string"
+        ? o.new_string
+        : typeof o.newString === "string"
+          ? o.newString
+          : "";
+    const oldLines = oldS.split(LINE_BREAK_RE);
     const newLines = neu.split(LINE_BREAK_RE);
     logical = [
       `${prefix}${o.path}`,
       ...oldLines.map((p, i) => (i === 0 ? `- ${p}` : p)),
       ...newLines.map((p, i) => (i === 0 ? `+ ${p}` : p)),
     ];
-  } else if (typeof o.path === "string" && typeof o.content === "string") {
-    logical = [`${prefix}${o.path}`, ...o.content.split(LINE_BREAK_RE)];
+  } else if (
+    typeof o.path === "string" &&
+    (typeof o.content === "string" || typeof o.contents === "string")
+  ) {
+    const fileContent =
+      typeof o.content === "string" ? o.content : String(o.contents ?? "");
+    logical = [`${prefix}${o.path}`, ...fileContent.split(LINE_BREAK_RE)];
   } else {
     const raw = formatToolArgs(args);
     if (!raw) logical = [`$ ${displayName}`];
@@ -839,8 +1330,10 @@ function formatShellResult(o) {
 /**
  * Format tool result preview for TUI.
  * Unwraps common {output|stdout|content|text|result|message} shapes.
- * Shell-shaped payloads include stderr and non-zero exit (empty stdout
- * must not hide the failure).
+ * List-like grep/glob/ls payloads stay one item per line (pi grep/find),
+ * not compact JSON. write/edit/mkdir/delete/ping use short prose. Other
+ * objects use indent-2 JSON. Shell-shaped payloads include stderr and
+ * non-zero exit (empty stdout must not hide the failure).
  * @param {unknown} content
  * @param {boolean} [ok]
  */
@@ -849,17 +1342,7 @@ export function formatToolResult(content, ok = true) {
   if (typeof content === "string") {
     body = content;
   } else if (Array.isArray(content)) {
-    body = content
-      .map((b) => {
-        if (typeof b === "string") return b;
-        if (b && typeof b === "object" && typeof b.text === "string") return b.text;
-        try {
-          return JSON.stringify(b);
-        } catch {
-          return String(b);
-        }
-      })
-      .join("\n");
+    body = formatUnknownList(content);
   } else if (content != null && typeof content === "object") {
     const o = /** @type {Record<string, unknown>} */ (content);
     if (isShellShapedResult(o)) {
@@ -869,22 +1352,35 @@ export function formatToolResult(content, ok = true) {
       const hint = typeof o.hint === "string" ? o.hint : "";
       body = [o.error, msg, hint].filter(Boolean).join("\n");
     } else {
-      for (const k of ["output", "stdout", "text", "message", "result", "content"]) {
-        if (typeof o[k] === "string" && o[k]) {
-          body = o[k];
-          break;
+      const mutation = formatMutationToolResult(o);
+      const readBody = formatReadFileResult(o);
+      const listed = formatListLikeToolResult(o);
+      if (mutation) {
+        body = mutation;
+      } else if (readBody) {
+        body = readBody;
+      } else if (listed) {
+        body = appendTruncatedHint(listed, o);
+      } else {
+        for (const k of ["output", "stdout", "text", "message", "result", "content"]) {
+          const v = o[k];
+          if (typeof v === "string" && v) {
+            body = v;
+            break;
+          }
+          if (Array.isArray(v) && v.length) {
+            body = formatUnknownList(v);
+            break;
+          }
         }
-      }
-      if (!body) {
-        try {
-          body = JSON.stringify(content, null, 0);
-        } catch {
-          body = String(content);
-        }
+        if (!body) body = prettyJson(content);
       }
     }
   } else if (content != null) {
     body = String(content);
+  }
+  if (typeof content === "string" || (body && !body.includes("\n"))) {
+    body = maybeExpandJsonString(body);
   }
   if (body.length > 4000) body = body.slice(0, 4000) + "\n…";
   if (!ok && !body) body = "(failed)";
