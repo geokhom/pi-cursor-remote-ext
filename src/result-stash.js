@@ -13,7 +13,7 @@
  */
 
 /**
- * @typedef {{ ok: boolean, content: unknown, name?: string, displayName?: string }} Stashed
+ * @typedef {{ ok: boolean, content: unknown, name?: string, displayName?: string, startedAt?: number, durationMs?: number }} Stashed
  * @typedef {{ text?: string, thinking?: string }} FollowUp
  */
 
@@ -23,6 +23,7 @@ const STATE_KEY = Symbol.for("pi-cursor-remote.result-stash.v1");
  * @returns {{
  *   stash: Map<string, Stashed>,
  *   idsByName: Map<string, string[]>,
+ *   startedAt: Map<string, number>,
  *   followUp: FollowUp | null,
  * }}
  */
@@ -32,6 +33,7 @@ function state() {
     g[STATE_KEY] = {
       stash: new Map(),
       idsByName: new Map(),
+      startedAt: new Map(),
       followUp: null,
     };
   }
@@ -44,7 +46,23 @@ function state() {
         : null;
     delete s.followUpText;
   }
+  if (!(s.startedAt instanceof Map)) {
+    s.startedAt = new Map();
+  }
   return s;
+}
+
+/**
+ * Wall-clock start of a remote tool (SSE `tool_call`). Duration is measured
+ * until `stashToolResult` (`tool_executed`) so TUI `Took` is not ~0 after the
+ * live-run drain already waited for the result.
+ * @param {string} callId
+ * @param {number} [at]
+ */
+export function markToolCallStarted(callId, at = Date.now()) {
+  if (!callId) return;
+  const s = state();
+  if (!s.startedAt.has(callId)) s.startedAt.set(callId, at);
 }
 
 /**
@@ -54,7 +72,21 @@ function state() {
 export function stashToolResult(callId, result) {
   if (!callId) return;
   const s = state();
-  s.stash.set(callId, result);
+  const started = s.startedAt.get(callId);
+  s.startedAt.delete(callId);
+  const incoming =
+    result && typeof result === "object" ? /** @type {Stashed} */ (result) : {};
+  const durationMs =
+    started != null
+      ? Math.max(0, Date.now() - started)
+      : typeof incoming.durationMs === "number" && Number.isFinite(incoming.durationMs)
+        ? incoming.durationMs
+        : undefined;
+  s.stash.set(callId, {
+    ...incoming,
+    ...(started != null ? { startedAt: started } : {}),
+    ...(durationMs != null ? { durationMs } : {}),
+  });
 }
 
 /**
@@ -148,6 +180,7 @@ export function clearToolResults() {
   const s = state();
   s.stash.clear();
   s.idsByName.clear();
+  s.startedAt.clear();
 }
 
 /**

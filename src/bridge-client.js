@@ -15,6 +15,7 @@ import { displayToolName } from "./tool-display.js";
 import {
   stashToolResult,
   clearToolResults,
+  markToolCallStarted,
   trackCallId,
   setFollowUp,
 } from "./result-stash.js";
@@ -1263,8 +1264,66 @@ export function formatToolArgs(args) {
   }
 }
 
+const TIMEOUT_SUFFIX_RE = /^(.*)( \(timeout \d+(?:\.\d+)?s\))$/;
+
+/**
+ * Explicit call timeout from args (contour `timeout` seconds, `timeout_s`, or
+ * `block_until_ms`). The default 600s TOOL_WAIT is omitted unless the model
+ * actually sent a timeout field.
+ * @param {unknown} args
+ * @returns {number | null}
+ */
+export function explicitTimeoutSeconds(args) {
+  const o = unwrapToolArgs(args);
+  const fromField = (raw, scale = 1) => {
+    if (raw == null || raw === "") return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n / scale;
+  };
+  const seconds = fromField(o.timeout);
+  if (seconds != null) return seconds;
+  const timeoutS = fromField(o.timeout_s);
+  if (timeoutS != null) return timeoutS;
+  return fromField(o.block_until_ms, 1000);
+}
+
+/**
+ * Stock pi bash suffix, e.g. ` (timeout 30s)`. Empty when there is no explicit timeout.
+ * @param {number | null | undefined} seconds
+ * @returns {string}
+ */
+export function formatTimeoutSuffix(seconds) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return "";
+  const rounded = Math.round(seconds * 10) / 10;
+  const shown = Number.isInteger(rounded) ? String(rounded) : String(rounded);
+  return ` (timeout ${shown}s)`;
+}
+
+/**
+ * Stock pi duration footer: `Took 1.5s` / `Elapsed 1.5s`.
+ * @param {number | null | undefined} ms
+ * @param {{ partial?: boolean }} [opts]
+ * @returns {string}
+ */
+export function formatToolDurationLine(ms, opts = {}) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return "";
+  const label = opts.partial ? "Elapsed" : "Took";
+  return `${label} ${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * @param {string} line
+ * @returns {{ body: string, suffix: string }}
+ */
+function splitTimeoutSuffix(line) {
+  const m = String(line ?? "").match(TIMEOUT_SUFFIX_RE);
+  return m ? { body: m[1], suffix: m[2] } : { body: String(line ?? ""), suffix: "" };
+}
+
 /**
  * Color tool-call headers like stock pi (name toolTitle, args accent, +/- bg).
+ * Explicit `(timeout Ns)` is dim, matching stock bash.
  * @param {string} displayName
  * @param {string[]} lines
  * @param {{ fg?: Function, bg?: Function, bold?: Function } | null | undefined} theme
@@ -1280,6 +1339,7 @@ export function applyToolCallTheme(displayName, lines, theme) {
       : theme.fg("toolTitle", s);
   const accent = (s) => theme.fg("accent", s);
   const out = (s) => theme.fg("toolOutput", s);
+  const dim = (s) => theme.fg("dim", s);
   const removed = (s) => {
     const fg = theme.fg("toolDiffRemoved", s);
     return typeof theme.bg === "function" ? theme.bg("toolErrorBg", fg) : fg;
@@ -1292,76 +1352,79 @@ export function applyToolCallTheme(displayName, lines, theme) {
   /** @type {"header" | "rm" | "add" | "body"} */
   let mode = "header";
   return lines.map((line, index) => {
-    const s = String(line ?? "");
-    if (name === "grep" || name === "rg") {
-      const m = s.match(/^(grep) (\/(?:\\\/|[^/])*\/)( in .*)$/);
-      if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
-    }
-    if (name === "glob") {
-      const m = s.match(/^(find) (.+?)( in .*)$/);
-      if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
-    }
-    if (name === "list_dir" || name === "ls") {
-      const m = s.match(/^(ls) (.*)$/);
-      if (m) return `${title(m[1])} ${accent(m[2])}`;
-    }
-    if (name === "read_file" || name === "read") {
-      const m = s.match(/^(read) (.*)$/);
-      if (m) return `${title(m[1])} ${accent(m[2])}`;
-    }
-    if (name === "mkdir") {
-      const m = s.match(/^(mkdir) (.*)$/);
-      if (m) return `${title(m[1])} ${accent(m[2])}`;
-    }
-    if (name === "delete_path" || name === "delete") {
-      const m = s.match(/^(delete) (.*)$/);
-      if (m) return `${title(m[1])} ${accent(m[2])}`;
-    }
-    if (name === "ping") return title(s || "ping");
-    if (/^WebSearch |^WebFetch /.test(s)) {
-      const sp = s.indexOf(" ");
-      return `${title(s.slice(0, sp))} ${accent(s.slice(sp + 1))}`;
-    }
-    if (name === "write_file" || name === "write") {
-      if (index === 0) {
-        const m = s.match(/^(write) (.*)$/);
+    const { body: s, suffix } = splitTimeoutSuffix(String(line ?? ""));
+    const painted = (() => {
+      if (name === "grep" || name === "rg") {
+        const m = s.match(/^(grep) (\/(?:\\\/|[^/])*\/)( in .*)$/);
+        if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
+      }
+      if (name === "glob") {
+        const m = s.match(/^(find) (.+?)( in .*)$/);
+        if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
+      }
+      if (name === "list_dir" || name === "ls") {
+        const m = s.match(/^(ls) (.*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}`;
       }
-      return out(s);
-    }
-    if (name === "str_replace" || name === "edit") {
-      if (index === 0) {
-        const m = s.match(/^(edit) (.*)$/);
+      if (name === "read_file" || name === "read") {
+        const m = s.match(/^(read) (.*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}`;
-        return title(s);
       }
-      if (s.startsWith("- ")) {
-        mode = "rm";
-        return removed(s);
+      if (name === "mkdir") {
+        const m = s.match(/^(mkdir) (.*)$/);
+        if (m) return `${title(m[1])} ${accent(m[2])}`;
       }
-      if (s.startsWith("+ ")) {
-        mode = "add";
-        return added(s);
+      if (name === "delete_path" || name === "delete") {
+        const m = s.match(/^(delete) (.*)$/);
+        if (m) return `${title(m[1])} ${accent(m[2])}`;
       }
-      if (mode === "rm") return removed(s);
-      if (mode === "add") return added(s);
-      return out(s);
-    }
-    if (name === "shell") {
-      if (index === 0 && s.startsWith("$ ")) {
-        return `${title("$")} ${accent(s.slice(2))}`;
-      }
-      return accent(s);
-    }
-    if (name.startsWith("mcp__") || name.includes("mcp__")) {
-      if (index === 0) {
+      if (name === "ping") return title(s || "ping");
+      if (/^WebSearch |^WebFetch /.test(s)) {
         const sp = s.indexOf(" ");
-        if (sp < 0) return title(s);
-        return `${title(s.slice(0, sp))} ${out(s.slice(sp + 1))}`;
+        return `${title(s.slice(0, sp))} ${accent(s.slice(sp + 1))}`;
       }
-      return out(s);
-    }
-    return index === 0 ? title(s) : out(s);
+      if (name === "write_file" || name === "write") {
+        if (index === 0) {
+          const m = s.match(/^(write) (.*)$/);
+          if (m) return `${title(m[1])} ${accent(m[2])}`;
+        }
+        return out(s);
+      }
+      if (name === "str_replace" || name === "edit") {
+        if (index === 0) {
+          const m = s.match(/^(edit) (.*)$/);
+          if (m) return `${title(m[1])} ${accent(m[2])}`;
+          return title(s);
+        }
+        if (s.startsWith("- ")) {
+          mode = "rm";
+          return removed(s);
+        }
+        if (s.startsWith("+ ")) {
+          mode = "add";
+          return added(s);
+        }
+        if (mode === "rm") return removed(s);
+        if (mode === "add") return added(s);
+        return out(s);
+      }
+      if (name === "shell") {
+        if (index === 0 && s.startsWith("$ ")) {
+          return `${title("$")} ${accent(s.slice(2))}`;
+        }
+        return accent(s);
+      }
+      if (name.startsWith("mcp__") || name.includes("mcp__")) {
+        if (index === 0) {
+          const sp = s.indexOf(" ");
+          if (sp < 0) return title(s);
+          return `${title(s.slice(0, sp))} ${out(s.slice(sp + 1))}`;
+        }
+        return out(s);
+      }
+      return index === 0 ? title(s) : out(s);
+    })();
+    return suffix ? `${painted}${dim(suffix)}` : painted;
   });
 }
 
@@ -1430,10 +1493,19 @@ export function formatToolCallLines(displayName, args, opts = {}) {
     }
   }
   if (!logical.length) logical.push(`$ ${displayName}`);
+  const timeoutSuffix = formatTimeoutSuffix(explicitTimeoutSeconds(o));
+  if (timeoutSuffix) {
+    logical[logical.length - 1] = `${logical[logical.length - 1] || ""}${timeoutSuffix}`;
+  }
   if (opts.theme) {
     logical = applyToolCallTheme(String(displayName || "tool"), logical, opts.theme);
   }
-  return layoutToolPanelLines(logical, width, { maxLines });
+  const rows = layoutToolPanelLines(logical, width, { maxLines });
+  if (timeoutSuffix && !rows.some((r) => r.includes("(timeout "))) {
+    const label = timeoutSuffix.trim();
+    rows.push(opts.theme && typeof opts.theme.fg === "function" ? opts.theme.fg("dim", label) : label);
+  }
+  return rows;
 }
 
 /**
@@ -2024,6 +2096,7 @@ async function drainLiveRunTurn(opts = {}) {
       (typeof callId === "string" && callId) ||
       `call-${Date.now().toString(36)}-${output.content.length}`;
     trackCallId(name, id);
+    markToolCallStarted(id);
     const contentIndex = output.content.length;
     const toolCall = {
       type: "toolCall",

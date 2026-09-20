@@ -16,6 +16,7 @@ import {
 import { takeToolResult, hasFollowUpText, hasToolResult } from "./result-stash.js";
 import {
   formatToolCallLines,
+  formatToolDurationLine,
   formatToolResult,
   hasActiveLiveRun,
   isToolExecutionError,
@@ -88,11 +89,15 @@ export function previewToolResultLines(displayName, text, expanded = false) {
   };
 }
 
+function isDurationFooter(row) {
+  return /^(Took|Elapsed) \d+\.\d+s$/.test(String(row ?? "").trim());
+}
+
 /**
  * Paint logical lines as TUI rows. Height = array length (newlines already split).
  * Empty rows are a space so the Box background does not tear.
  * @param {string[] | ((width: number) => string[])} linesOrFn
- * @param {{ theme?: { fg: (name: string, text: string) => string, bold: (text: string) => string }, color?: string, bold?: boolean, maxLines?: number }} [style]
+ * @param {{ theme?: { fg: (name: string, text: string) => string, bold: (text: string) => string }, color?: string, bold?: boolean, maxLines?: number, precolored?: boolean }} [style]
  */
 function panelLinesComponent(linesOrFn, style = {}) {
   return {
@@ -104,7 +109,9 @@ function panelLinesComponent(linesOrFn, style = {}) {
       });
       return rows.map((row) => {
         let styled = row;
-        if (!style.precolored && style.theme && style.color) {
+        if (style.theme && isDurationFooter(row)) {
+          styled = style.theme.fg("dim", row);
+        } else if (!style.precolored && style.theme && style.color) {
           styled = style.bold
             ? style.theme.fg(style.color, style.theme.bold(row))
             : style.theme.fg(style.color, row);
@@ -167,6 +174,30 @@ export async function takeToolResultWhenReady(
 }
 
 /**
+ * @param {unknown} result
+ * @param {unknown} context
+ * @param {{ isPartial?: boolean }} [options]
+ * @returns {number | undefined}
+ */
+function resolveToolDurationMs(result, context, options) {
+  const details = result && typeof result === "object" ? /** @type {{ details?: { durationMs?: unknown } }} */ (result).details : undefined;
+  const fromDetails = details?.durationMs;
+  if (typeof fromDetails === "number" && Number.isFinite(fromDetails) && fromDetails >= 0) {
+    return fromDetails;
+  }
+  const state = context && typeof context === "object" ? /** @type {{ state?: { startedAt?: unknown, endedAt?: unknown } }} */ (context).state : undefined;
+  const started = state?.startedAt;
+  if (typeof started === "number" && Number.isFinite(started)) {
+    if (!options?.isPartial && state && state.endedAt === undefined) {
+      state.endedAt = Date.now();
+    }
+    const end = typeof state?.endedAt === "number" ? state.endedAt : Date.now();
+    return Math.max(0, end - started);
+  }
+  return undefined;
+}
+
+/**
  * @param {string} displayName
  */
 function makeShadowTool(displayName) {
@@ -177,7 +208,11 @@ function makeShadowTool(displayName) {
     // Omit promptSnippet so default system prompt does not advertise these.
     parameters: ANY_OBJECT,
     executionMode: "parallel",
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      const state = context?.state;
+      if (state && context.executionStarted && state.startedAt === undefined) {
+        state.startedAt = Date.now();
+      }
       return panelLinesComponent(
         (width) =>
           formatToolCallLines(displayName, args, { width, theme }),
@@ -189,12 +224,24 @@ function makeShadowTool(displayName) {
         .filter((c) => c && c.type === "text" && typeof c.text === "string")
         .map((c) => c.text)
         .join("\n");
-      if (!text) return panelLinesComponent([""]);
+      const durationLine = formatToolDurationLine(
+        resolveToolDurationMs(result, context, options),
+        { partial: Boolean(options?.isPartial) && !context?.isError },
+      );
       const color =
         result?.isError || context?.isError ? "error" : "toolOutput";
       const expanded = Boolean(options?.expanded);
+      /** @param {string[]} rows */
+      const withDuration = (rows) =>
+        durationLine ? [...rows, durationLine] : rows;
+      if (!text) {
+        return panelLinesComponent(withDuration(durationLine ? [] : [""]), {
+          theme,
+          color,
+        });
+      }
       if (expanded) {
-        return panelLinesComponent(text.split(/\r?\n/), {
+        return panelLinesComponent(withDuration(text.split(/\r?\n/)), {
           theme,
           color,
           maxLines: 80,
@@ -209,14 +256,13 @@ function makeShadowTool(displayName) {
         const hint = fromStart
           ? `... (${skipped} more lines, Ctrl+O to expand)`
           : `... (${skipped} earlier lines, Ctrl+O to expand)`;
-        return panelLinesComponent(
-          fromStart ? [...preview, hint] : [hint, ...preview],
-          { theme, color },
-        );
+        const body = fromStart ? [...preview, hint] : [hint, ...preview];
+        return panelLinesComponent(withDuration(body), { theme, color });
       }
-      return panelLinesComponent(["", ...preview], { theme, color });
+      return panelLinesComponent(withDuration(["", ...preview]), { theme, color });
     },
     async execute(toolCallId, _params, _signal, onUpdate, _ctx) {
+      const execStarted = Date.now();
       const stashed = await takeToolResultWhenReady(toolCallId, displayName);
       // Continue the agent loop while live SSE still has turns, or legacy follow-up.
       const terminate = !hasFollowUpText() && !hasActiveLiveRun();
@@ -230,18 +276,22 @@ function makeShadowTool(displayName) {
                 "This tool only completes Cursor Remote runs.",
             },
           ],
-          details: { ok: false },
+          details: { ok: false, durationMs: Date.now() - execStarted },
           isError: true,
           terminate,
         };
       }
       const isError = isToolExecutionError(stashed.ok, stashed.content);
       const body = contentToText(stashed.content, !isError);
+      const durationMs =
+        typeof stashed.durationMs === "number" && Number.isFinite(stashed.durationMs)
+          ? stashed.durationMs
+          : Date.now() - execStarted;
       const result = {
         content: [
           { type: "text", text: body || (isError ? "(failed)" : "(ok)") },
         ],
-        details: { wireName: stashed.name, ok: !isError },
+        details: { wireName: stashed.name, ok: !isError, durationMs },
         isError,
         terminate,
       };

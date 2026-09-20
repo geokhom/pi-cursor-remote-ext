@@ -636,7 +636,10 @@ export {
 export {
   formatToolArgs,
   formatToolCallLines,
+  formatTimeoutSuffix,
+  formatToolDurationLine,
   formatToolResult,
+  explicitTimeoutSeconds,
   isToolExecutionError,
   layoutToolPanelLines,
   unwrapToolArgs,
