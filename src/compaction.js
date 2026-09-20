@@ -108,6 +108,49 @@ function looksLikeHermesOperations(text) {
 }
 
 /**
+ * Hermes auto-review expects a JSON object. Cursor often wraps it in ```json
+ * or prefixes prose — that becomes Direct `parse_error`.
+ * @param {string} text
+ * @returns {string}
+ */
+export function unwrapHermesJsonText(text) {
+  const raw = String(text || "");
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+  const fenced = trimmed.match(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/i);
+  if (fenced) return fenced[1].trim();
+  if (trimmed.startsWith("{") && trimmed.includes('"operations"')) return trimmed;
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const slice = trimmed.slice(start, end + 1);
+    if (slice.includes('"operations"')) return slice;
+  }
+  return raw;
+}
+
+/**
+ * @param {object} ev
+ * @returns {object}
+ */
+function unwrapHermesJsonEvent(ev) {
+  if (!ev || typeof ev !== "object") return ev;
+  if (ev.type === "done" && ev.message && Array.isArray(ev.message.content)) {
+    const content = ev.message.content.map((block) => {
+      if (block && block.type === "text" && typeof block.text === "string") {
+        return { ...block, text: unwrapHermesJsonText(block.text) };
+      }
+      return block;
+    });
+    return { ...ev, message: { ...ev.message, content } };
+  }
+  if (ev.type === "text_end" && typeof ev.content === "string") {
+    return { ...ev, content: unwrapHermesJsonText(ev.content) };
+  }
+  return ev;
+}
+
+/**
  * Fit a Hermes/compact dump so POST /prompt stays under the bridge body cap.
  * Keep the operations-schema head and the recent transcript tail.
  *
@@ -299,6 +342,10 @@ export async function runSummarizationViaBridge(args) {
     });
   };
   keepAlive = setInterval(pokeKeepAlive, SUMMARIZE_KEEPALIVE_MS);
+  if (looksLikeHermesOperations(text)) {
+    clearInterval(keepAlive);
+    keepAlive = null;
+  }
   let busyAttempts = 0;
   const promptOpts = {
     applyGrants: false,
@@ -316,6 +363,9 @@ export async function runSummarizationViaBridge(args) {
     skipStart: true,
     onStreamEvent: (ev) => {
       if (ev?.type === "_end" || ev?.type === "start") return;
+      if (looksLikeHermesOperations(text)) {
+        ev = unwrapHermesJsonEvent(ev);
+      }
       stream.push(ev);
     },
   };

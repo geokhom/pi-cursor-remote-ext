@@ -104,7 +104,7 @@ function panelLinesComponent(linesOrFn, style = {}) {
       });
       return rows.map((row) => {
         let styled = row;
-        if (style.theme && style.color) {
+        if (!style.precolored && style.theme && style.color) {
           styled = style.bold
             ? style.theme.fg(style.color, style.theme.bold(row))
             : style.theme.fg(style.color, row);
@@ -179,8 +179,9 @@ function makeShadowTool(displayName) {
     executionMode: "parallel",
     renderCall(args, theme) {
       return panelLinesComponent(
-        (width) => formatToolCallLines(displayName, args, { width }),
-        { theme, color: "toolTitle", bold: true }
+        (width) =>
+          formatToolCallLines(displayName, args, { width, theme }),
+        { theme, precolored: true }
       );
     },
     renderResult(result, options, theme, context) {

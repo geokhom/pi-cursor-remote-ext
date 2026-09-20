@@ -944,30 +944,86 @@ function prettyJson(value) {
  * @param {string} s
  * @returns {string}
  */
-function maybeExpandJsonString(s) {
-  if (typeof s !== "string" || s.includes("\n")) return s;
+function maybeExpandJsonString(s, ok = true) {
+  if (typeof s !== "string") return s;
   const t = s.trim();
   if (t.length < 2) return s;
   const objLike =
     (t.startsWith("{") && t.endsWith("}")) ||
     (t.startsWith("[") && t.endsWith("]"));
-  if (!objLike) return s;
-  try {
-    const parsed = JSON.parse(t);
-    if (Array.isArray(parsed)) {
-      return formatUnknownList(parsed) || s;
+  if (objLike) {
+    try {
+      const parsed = JSON.parse(t);
+      return formatToolResult(parsed, ok, { expandJson: false });
+    } catch {
+      const salvaged = salvageTruncatedToolJson(s);
+      if (salvaged) return salvaged;
+      return s;
     }
-    if (parsed && typeof parsed === "object") {
-      const listed = formatListLikeToolResult(
-        /** @type {Record<string, unknown>} */ (parsed),
-      );
-      if (listed) return listed;
-      return prettyJson(parsed);
-    }
-  } catch {
-    return s;
+  }
+  if (!s.includes("\n") && (s.includes('"stdout":"') || s.includes('"content":"'))) {
+    const salvaged = salvageTruncatedToolJson(s);
+    if (salvaged) return salvaged;
   }
   return s;
+}
+
+/**
+ * Recover file/shell text from a compact JSON blob truncated mid-string.
+ * @param {string} s
+ * @returns {string}
+ */
+function salvageTruncatedToolJson(s) {
+  const stdout = extractJsonStringField(s, "stdout");
+  if (stdout) {
+    const stderr = extractJsonStringField(s, "stderr");
+    return stderr ? `${stdout}\n${stderr}` : stdout;
+  }
+  return extractJsonStringField(s, "content");
+}
+
+/**
+ * @param {string} s
+ * @param {string} key
+ * @returns {string}
+ */
+function extractJsonStringField(s, key) {
+  const needle = `"${key}":"`;
+  const i = s.indexOf(needle);
+  if (i < 0) return "";
+  let out = "";
+  for (let j = i + needle.length; j < s.length; j++) {
+    const ch = s[j];
+    if (ch === "\\" && j + 1 < s.length) {
+      const n = s[j + 1];
+      if (n === "n") {
+        out += "\n";
+        j += 1;
+        continue;
+      }
+      if (n === "t") {
+        out += "\t";
+        j += 1;
+        continue;
+      }
+      if (n === '"') {
+        out += '"';
+        j += 1;
+        continue;
+      }
+      if (n === "\\") {
+        out += "\\";
+        j += 1;
+        continue;
+      }
+      out += n;
+      j += 1;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+  }
+  return out;
 }
 
 /**
@@ -1069,7 +1125,13 @@ function formatMutationToolResult(o) {
  */
 function formatReadFileResult(o) {
   if (typeof o.content !== "string") return "";
-  if (o.start_line == null && o.total_lines == null && o.file_size == null && o.end_line == null) {
+  if (
+    typeof o.path !== "string" &&
+    o.start_line == null &&
+    o.total_lines == null &&
+    o.file_size == null &&
+    o.end_line == null
+  ) {
     return "";
   }
   let body = o.content;
@@ -1202,11 +1264,113 @@ export function formatToolArgs(args) {
 }
 
 /**
+ * Color tool-call headers like stock pi (name toolTitle, args accent, +/- bg).
+ * @param {string} displayName
+ * @param {string[]} lines
+ * @param {{ fg?: Function, bg?: Function, bold?: Function } | null | undefined} theme
+ * @returns {string[]}
+ */
+export function applyToolCallTheme(displayName, lines, theme) {
+  if (!theme || typeof theme.fg !== "function" || !Array.isArray(lines)) {
+    return lines;
+  }
+  const title = (s) =>
+    typeof theme.bold === "function"
+      ? theme.fg("toolTitle", theme.bold(s))
+      : theme.fg("toolTitle", s);
+  const accent = (s) => theme.fg("accent", s);
+  const out = (s) => theme.fg("toolOutput", s);
+  const removed = (s) => {
+    const fg = theme.fg("toolDiffRemoved", s);
+    return typeof theme.bg === "function" ? theme.bg("toolErrorBg", fg) : fg;
+  };
+  const added = (s) => {
+    const fg = theme.fg("toolDiffAdded", s);
+    return typeof theme.bg === "function" ? theme.bg("toolSuccessBg", fg) : fg;
+  };
+  const name = String(displayName || "");
+  /** @type {"header" | "rm" | "add" | "body"} */
+  let mode = "header";
+  return lines.map((line, index) => {
+    const s = String(line ?? "");
+    if (name === "grep" || name === "rg") {
+      const m = s.match(/^(grep) (\/(?:\\\/|[^/])*\/)( in .*)$/);
+      if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
+    }
+    if (name === "glob") {
+      const m = s.match(/^(find) (.+?)( in .*)$/);
+      if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
+    }
+    if (name === "list_dir" || name === "ls") {
+      const m = s.match(/^(ls) (.*)$/);
+      if (m) return `${title(m[1])} ${accent(m[2])}`;
+    }
+    if (name === "read_file" || name === "read") {
+      const m = s.match(/^(read) (.*)$/);
+      if (m) return `${title(m[1])} ${accent(m[2])}`;
+    }
+    if (name === "mkdir") {
+      const m = s.match(/^(mkdir) (.*)$/);
+      if (m) return `${title(m[1])} ${accent(m[2])}`;
+    }
+    if (name === "delete_path" || name === "delete") {
+      const m = s.match(/^(delete) (.*)$/);
+      if (m) return `${title(m[1])} ${accent(m[2])}`;
+    }
+    if (name === "ping") return title(s || "ping");
+    if (/^WebSearch |^WebFetch /.test(s)) {
+      const sp = s.indexOf(" ");
+      return `${title(s.slice(0, sp))} ${accent(s.slice(sp + 1))}`;
+    }
+    if (name === "write_file" || name === "write") {
+      if (index === 0) {
+        const m = s.match(/^(write) (.*)$/);
+        if (m) return `${title(m[1])} ${accent(m[2])}`;
+      }
+      return out(s);
+    }
+    if (name === "str_replace" || name === "edit") {
+      if (index === 0) {
+        const m = s.match(/^(edit) (.*)$/);
+        if (m) return `${title(m[1])} ${accent(m[2])}`;
+        return title(s);
+      }
+      if (s.startsWith("- ")) {
+        mode = "rm";
+        return removed(s);
+      }
+      if (s.startsWith("+ ")) {
+        mode = "add";
+        return added(s);
+      }
+      if (mode === "rm") return removed(s);
+      if (mode === "add") return added(s);
+      return out(s);
+    }
+    if (name === "shell") {
+      if (index === 0 && s.startsWith("$ ")) {
+        return `${title("$")} ${accent(s.slice(2))}`;
+      }
+      return accent(s);
+    }
+    if (name.startsWith("mcp__") || name.includes("mcp__")) {
+      if (index === 0) {
+        const sp = s.indexOf(" ");
+        if (sp < 0) return title(s);
+        return `${title(s.slice(0, sp))} ${out(s.slice(sp + 1))}`;
+      }
+      return out(s);
+    }
+    return index === 0 ? title(s) : out(s);
+  });
+}
+
+/**
  * Multi-line tool_call header for pi TUI (sed scripts, write_file body).
  * Pass `width` from render() so long one-liners wrap instead of ending in `…`.
  * @param {string} displayName
  * @param {unknown} args
- * @param {{ maxLines?: number, width?: number }} [opts]
+ * @param {{ maxLines?: number, width?: number, theme?: object }} [opts]
  * @returns {string[]}
  */
 export function formatToolCallLines(displayName, args, opts = {}) {
@@ -1214,59 +1378,61 @@ export function formatToolCallLines(displayName, args, opts = {}) {
   const width = opts.width;
   const o = unwrapToolArgs(args);
   const native = formatNativeToolCallLines(String(displayName || "tool"), o);
-  if (native) {
-    return layoutToolPanelLines(native, width, { maxLines });
-  }
-  const shell = displayName === "shell";
-  const writeLike = displayName === "write_file" || displayName === "write";
-  const editLike = displayName === "str_replace" || displayName === "edit";
-  const prefix = shell
-    ? "$ "
-    : writeLike
-      ? "write "
-      : editLike
-        ? "edit "
-        : `$ ${displayName} `;
   /** @type {string[]} */
-  let logical = [];
-  if (typeof o.command === "string") {
-    const parts = o.command.split(LINE_BREAK_RE);
-    logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
-  } else if (
-    typeof o.path === "string" &&
-    (typeof o.old_string === "string" || typeof o.oldString === "string")
-  ) {
-    const oldS =
-      typeof o.old_string === "string" ? o.old_string : String(o.oldString ?? "");
-    const neu =
-      typeof o.new_string === "string"
-        ? o.new_string
-        : typeof o.newString === "string"
-          ? o.newString
-          : "";
-    const oldLines = oldS.split(LINE_BREAK_RE);
-    const newLines = neu.split(LINE_BREAK_RE);
-    logical = [
-      `${prefix}${o.path}`,
-      ...oldLines.map((p, i) => (i === 0 ? `- ${p}` : p)),
-      ...newLines.map((p, i) => (i === 0 ? `+ ${p}` : p)),
-    ];
-  } else if (
-    typeof o.path === "string" &&
-    (typeof o.content === "string" || typeof o.contents === "string")
-  ) {
-    const fileContent =
-      typeof o.content === "string" ? o.content : String(o.contents ?? "");
-    logical = [`${prefix}${o.path}`, ...fileContent.split(LINE_BREAK_RE)];
-  } else {
-    const raw = formatToolArgs(args);
-    if (!raw) logical = [`$ ${displayName}`];
-    else {
-      const parts = String(raw).split(LINE_BREAK_RE);
+  let logical = native ? [...native] : [];
+  if (!native) {
+    const shell = displayName === "shell";
+    const writeLike = displayName === "write_file" || displayName === "write";
+    const editLike = displayName === "str_replace" || displayName === "edit";
+    const prefix = shell
+      ? "$ "
+      : writeLike
+        ? "write "
+        : editLike
+          ? "edit "
+          : `$ ${displayName} `;
+    if (typeof o.command === "string") {
+      const parts = o.command.split(LINE_BREAK_RE);
       logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
+    } else if (
+      typeof o.path === "string" &&
+      (typeof o.old_string === "string" || typeof o.oldString === "string")
+    ) {
+      const oldS =
+        typeof o.old_string === "string" ? o.old_string : String(o.oldString ?? "");
+      const neu =
+        typeof o.new_string === "string"
+          ? o.new_string
+          : typeof o.newString === "string"
+            ? o.newString
+            : "";
+      const oldLines = oldS.split(LINE_BREAK_RE);
+      const newLines = neu.split(LINE_BREAK_RE);
+      logical = [
+        `${prefix}${o.path}`,
+        ...oldLines.map((p, i) => (i === 0 ? `- ${p}` : p)),
+        ...newLines.map((p, i) => (i === 0 ? `+ ${p}` : p)),
+      ];
+    } else if (
+      typeof o.path === "string" &&
+      (typeof o.content === "string" || typeof o.contents === "string")
+    ) {
+      const fileContent =
+        typeof o.content === "string" ? o.content : String(o.contents ?? "");
+      logical = [`${prefix}${o.path}`, ...fileContent.split(LINE_BREAK_RE)];
+    } else {
+      const raw = formatToolArgs(args);
+      if (!raw) logical = [`$ ${displayName}`];
+      else {
+        const parts = String(raw).split(LINE_BREAK_RE);
+        logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
+      }
     }
   }
   if (!logical.length) logical.push(`$ ${displayName}`);
+  if (opts.theme) {
+    logical = applyToolCallTheme(String(displayName || "tool"), logical, opts.theme);
+  }
   return layoutToolPanelLines(logical, width, { maxLines });
 }
 
@@ -1336,8 +1502,10 @@ function formatShellResult(o) {
  * non-zero exit (empty stdout must not hide the failure).
  * @param {unknown} content
  * @param {boolean} [ok]
+ * @param {{ expandJson?: boolean }} [opts]
  */
-export function formatToolResult(content, ok = true) {
+export function formatToolResult(content, ok = true, opts = {}) {
+  const expandJson = opts.expandJson !== false;
   let body = "";
   if (typeof content === "string") {
     body = content;
@@ -1379,8 +1547,8 @@ export function formatToolResult(content, ok = true) {
   } else if (content != null) {
     body = String(content);
   }
-  if (typeof content === "string" || (body && !body.includes("\n"))) {
-    body = maybeExpandJsonString(body);
+  if (expandJson && (typeof content === "string" || (body && !body.includes("\n")))) {
+    body = maybeExpandJsonString(body, ok);
   }
   if (body.length > 4000) body = body.slice(0, 4000) + "\n…";
   if (!ok && !body) body = "(failed)";
