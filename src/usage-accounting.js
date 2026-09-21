@@ -69,8 +69,11 @@ export function promptOccupancyTokens(turnUsage) {
  * @param {{ maxTokens?: number } | undefined} [model]
  */
 export function isCursorSdkUsagePartitionSafe(turnUsage, model) {
-  const maxOut =
-    Number(model?.maxTokens) > 0 ? Number(model.maxTokens) : OUTPUT_SANITY_MAX;
+  // model.maxTokens on cursor-remote is the picker placeholder (8192), not the
+  // SDK output. A real grok/composer turn is often larger and was replaced
+  // by a chars/4 estimate in the TUI.
+  const maxOut = OUTPUT_SANITY_MAX;
+  void model;
   const counts = [
     turnUsage.inputTokens,
     turnUsage.outputTokens,
@@ -97,7 +100,14 @@ export function isCursorSdkUsageSafeForPiMessage(turnUsage, model) {
   if (!isCursorSdkUsagePartitionSafe(turnUsage, model)) return false;
   const window = Number(model?.contextWindow) || 0;
   if (window > 0) {
-    return turnUsage.inputTokens + turnUsage.outputTokens <= window;
+    // The prompt may fill the window; output sits on top of it.
+    // input+output <= window dropped ordinary grok turns and the footer
+    // then showed a chars/4 stand-in. A sum many times the window is still
+    // a multi-step aggregate and stays rejected.
+    return (
+      promptOccupancyTokens(turnUsage) <= window &&
+      turnUsage.outputTokens <= OUTPUT_SANITY_MAX
+    );
   }
   return promptOccupancyTokens(turnUsage) <= USAGE_SANITY_MAX;
 }
