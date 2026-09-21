@@ -44,6 +44,8 @@ import {
   fallbackProviderModels,
   cachedProviderModels,
   bootstrapProviderModels,
+  pinProviderModel,
+  loadPinnedCursorModelId,
   saveModelsCache,
   registerModelItems,
   resolveModelOrFallback,
@@ -133,7 +135,31 @@ function createProviderConfig(models) {
 }
 
 function registerCursorRemoteProvider(pi, models) {
-  pi.registerProvider("cursor-remote", createProviderConfig(models));
+  pi.registerProvider(
+    "cursor-remote",
+    createProviderConfig(pinProviderModel(models, loadPinnedCursorModelId()))
+  );
+}
+
+/**
+ * Session files restore the last model (often llama-cpp) even after the user
+ * set a Cursor Remote default. Switch to that default once it is registered.
+ * @param {import('./types.js').ExtensionAPI & { setModel?: Function, modelRegistry?: { getModel?: Function } }} pi
+ * @param {{ model?: { id?: string, provider?: string } } | null | undefined} ctx
+ */
+async function applySavedDefaultModel(pi, ctx) {
+  const pinned = loadPinnedCursorModelId();
+  if (!pinned || typeof pi?.setModel !== "function") return false;
+  const cur = ctx?.model;
+  if (cur?.provider === "cursor-remote" && cur?.id === pinned) return true;
+  const model = pi.modelRegistry?.getModel?.("cursor-remote", pinned);
+  if (!model) return false;
+  try {
+    await pi.setModel(model);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -473,12 +499,25 @@ export default async function register(pi) {
           preferLive: true,
         });
         registerCursorRemoteProvider(pi, next);
+        const applied = await applySavedDefaultModel(pi, ctx);
         const cur = ctx?.model?.id || event?.model?.id;
         const curProv = ctx?.model?.provider || event?.model?.provider;
         const resolved = resolveModelOrFallback(cur, next);
-        if (curProv && curProv !== "cursor-remote" && typeof ctx?.ui?.notify === "function") {
+        const pinned = loadPinnedCursorModelId();
+        if (applied) {
+          if (next.length > 3 && typeof ctx?.ui?.notify === "function") {
+            ctx.ui.notify(
+              `Cursor Remote models ready (${next.length}).`,
+              "info"
+            );
+          }
+        } else if (
+          curProv &&
+          curProv !== "cursor-remote" &&
+          typeof ctx?.ui?.notify === "function"
+        ) {
           ctx.ui.notify(
-            `Session model is ${curProv}/${cur || "?"}. Switch to Cursor Remote (${resolved}).`,
+            `Session model is ${curProv}/${cur || "?"}. Switch to Cursor Remote (${pinned || resolved}).`,
             "warning"
           );
         } else if (
@@ -503,7 +542,11 @@ export default async function register(pi) {
           );
         }
       } catch {
-        // keep previous registration
+        try {
+          await applySavedDefaultModel(pi, ctx);
+        } catch {
+          // keep previous registration
+        }
       }
     });
     pi.on("before_agent_start", async (event, ctx) => {

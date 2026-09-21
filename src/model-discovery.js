@@ -440,7 +440,87 @@ export function bootstrapProviderModels() {
   }
   const composer = byId.get(DEFAULT_MODEL);
   if (composer) byId.set(DEFAULT_MODEL, withFastParam(composer));
-  return registerModelItems([...byId.values()]);
+  return pinProviderModel(
+    registerModelItems([...byId.values()]),
+    loadPinnedCursorModelId()
+  );
+}
+
+/**
+ * Pi settings default (`defaultProvider` + `defaultModel`). Null when the
+ * saved default is another provider.
+ * @returns {string | null}
+ */
+export function loadPinnedCursorModelId() {
+  try {
+    const path = join(dirname(defaultConfigPath()), "settings.json");
+    if (!existsSync(path)) return null;
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    if (raw?.defaultProvider !== "cursor-remote") return null;
+    if (typeof raw.defaultModel !== "string") return null;
+    const id = raw.defaultModel.trim();
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keep the saved picker id in the registered set. A large catalog hits
+ * MAX_PICKER_MODELS before grok variants, and pi then opens llama-cpp
+ * instead of the default.
+ * @param {object[]} configs
+ * @param {string | null | undefined} pinnedId
+ */
+export function pinProviderModel(configs, pinnedId) {
+  const list = Array.isArray(configs) ? [...configs] : [];
+  const raw = typeof pinnedId === "string" ? pinnedId.trim() : "";
+  if (!raw) return list;
+  const parsed = parsePiModelId(raw);
+  const canonical = encodePiModelId(
+    parsed.baseId,
+    parsed.context,
+    parsed.fastOverride
+  );
+  if (list.some((m) => m?.id === canonical || m?.id === raw)) return list;
+  const store = metadataByPiModelId();
+  if (!store.has(canonical)) {
+    const params = [];
+    if (parsed.context) params.push({ id: "context", value: parsed.context });
+    if (parsed.fastOverride === true) params.push({ id: "fast", value: "true" });
+    if (parsed.fastOverride === false) params.push({ id: "fast", value: "false" });
+    store.set(canonical, {
+      piModelId: canonical,
+      baseModelId: parsed.baseId,
+      selectionModelId: parsed.baseId,
+      displayName: parsed.baseId,
+      defaultParams: params,
+      context: parsed.context,
+      contextWindow: resolveContextWindow(parsed.baseId, parsed.context),
+      supportsFast: parsed.fastOverride !== undefined,
+      defaultFast: parsed.fastOverride === true,
+      fastOverride: parsed.fastOverride,
+      supportsReasoning: false,
+      thinkingLevelMap: undefined,
+      parameterIds: {
+        context: Boolean(parsed.context),
+        reasoning: false,
+        effort: false,
+        thinking: false,
+        fast: parsed.fastOverride !== undefined,
+      },
+    });
+  }
+  list.push({
+    id: canonical,
+    name: parsed.baseId,
+    reasoning: false,
+    input: ["text"],
+    cost: { ...ZERO_COST },
+    contextWindow: PI_AUTOCOMPACT_DISABLE_WINDOW,
+    maxTokens: FALLBACK_MAX_TOKENS,
+  });
+  return list;
 }
 
 export function getCursorModelMetadata(modelId) {
