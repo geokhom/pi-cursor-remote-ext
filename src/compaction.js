@@ -146,25 +146,67 @@ export function contextLooksLikeHermesReview(context) {
 }
 
 /**
+ * Hermes `parseReviewOperations` needs a JSON object with an `operations`
+ * array. Cursor often wraps it in ```json, prefixes prose, or (with thinking)
+ * emits nothing on the visible text channel.
+ * @param {string} text
+ * @returns {string | null} canonical `{"operations":...}` or null
+ */
+export function parseHermesOperationsJson(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return null;
+  /** @param {string} raw */
+  const tryObj = (raw) => {
+    try {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object" && !Array.isArray(obj) && Array.isArray(obj.operations)) {
+        return JSON.stringify(obj);
+      }
+    } catch {
+      // not JSON
+    }
+    return null;
+  };
+  const direct = tryObj(trimmed);
+  if (direct) return direct;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    const got = tryObj(fenced[1].trim());
+    if (got) return got;
+  }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return tryObj(trimmed.slice(start, end + 1));
+  }
+  return null;
+}
+
+/**
  * Hermes auto-review expects a JSON object. Cursor often wraps it in ```json
  * or prefixes prose — that becomes Direct `parse_error`.
  * @param {string} text
  * @returns {string}
  */
 export function unwrapHermesJsonText(text) {
+  const parsed = parseHermesOperationsJson(text);
+  if (parsed) return parsed;
   const raw = String(text || "");
-  const trimmed = raw.trim();
-  if (!trimmed) return raw;
-  const fenced = trimmed.match(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/i);
-  if (fenced) return fenced[1].trim();
-  if (trimmed.startsWith("{") && trimmed.includes('"operations"')) return trimmed;
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    const slice = trimmed.slice(start, end + 1);
-    if (slice.includes('"operations"')) return slice;
+  if (/nothing to save/i.test(raw) && !raw.includes("{")) {
+    return '{"operations":[]}';
   }
   return raw;
+}
+
+/**
+ * Visible-channel JSON for Hermes. Empty / unparseable assistant text (typical
+ * when thinking was dropped) must still be `{"operations":[]}` so Direct is
+ * empty-success instead of parse_error + subprocess "model not found".
+ * @param {string} text
+ * @returns {string}
+ */
+export function hermesReviewResultText(text) {
+  return parseHermesOperationsJson(text) || '{"operations":[]}';
 }
 
 /**
@@ -173,13 +215,27 @@ export function unwrapHermesJsonText(text) {
  */
 function unwrapHermesJsonEvent(ev) {
   if (!ev || typeof ev !== "object") return ev;
-  if (ev.type === "done" && ev.message && Array.isArray(ev.message.content)) {
-    const content = ev.message.content.map((block) => {
+  if (ev.type === "done" && ev.message) {
+    const rawContent = Array.isArray(ev.message.content) ? ev.message.content : [];
+    const content = rawContent.map((block) => {
       if (block && block.type === "text" && typeof block.text === "string") {
         return { ...block, text: unwrapHermesJsonText(block.text) };
       }
       return block;
     });
+    const joined = content
+      .filter((b) => b && b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("\n");
+    if (!parseHermesOperationsJson(joined)) {
+      return {
+        ...ev,
+        message: {
+          ...ev.message,
+          content: [{ type: "text", text: hermesReviewResultText(joined) }],
+        },
+      };
+    }
     return { ...ev, message: { ...ev.message, content } };
   }
   if (ev.type === "text_end" && typeof ev.content === "string") {
@@ -339,11 +395,15 @@ export async function runSummarizationViaBridge(args) {
       unixPath: conn.unixPath,
     });
   const piModelId = typeof model?.id === "string" ? model.id : DEFAULT_MODEL;
-  const thinkingLevel =
-    options?.thinkingLevel ||
-    options?.reasoning ||
-    context?.thinkingLevel ||
-    "off";
+  // Hermes review parses visible assistant text as JSON. Session thinkingLevel
+  // (medium) puts the JSON in thinking, which summarize drops (thinking_display
+  // off) → Direct parse_error. Compact summaries can keep the caller's level.
+  const thinkingLevel = looksLikeHermesOperations(text)
+    ? "off"
+    : options?.thinkingLevel ||
+      options?.reasoning ||
+      context?.thinkingLevel ||
+      "off";
   const signal = options?.signal;
   stream.push({
     type: "start",

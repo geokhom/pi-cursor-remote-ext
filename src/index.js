@@ -633,6 +633,9 @@ export {
   runSummarizationViaBridge,
   summarizationPromptFromContext,
   contextLooksLikeHermesReview,
+  unwrapHermesJsonText,
+  parseHermesOperationsJson,
+  hermesReviewResultText,
 } from "./compaction.js";
 export {
   formatToolArgs,
