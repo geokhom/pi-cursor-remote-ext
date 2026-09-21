@@ -472,20 +472,31 @@ function applyThinkingLevel(metadata, params, level) {
   if (!metadata?.thinkingLevelMap || level === "off") {
     if (metadata?.parameterIds?.thinking) {
       const idx = params.findIndex((p) => p.id === "thinking");
-      if (idx >= 0) params.splice(idx, 1);
+      if (idx >= 0) params[idx].value = "false";
       else params.push({ id: "thinking", value: "false" });
     }
-    if (metadata?.parameterIds?.reasoning) {
-      const mapped = metadata.thinkingLevelMap?.off;
-      if (mapped) {
-        const existing = params.find((p) => p.id === "reasoning" || p.id === "effort");
-        if (existing) existing.value = mapped;
-        else {
-          const id = metadata.parameterIds.effort ? "effort" : "reasoning";
-          params.push({ id, value: mapped });
-        }
+    const mapped = metadata.thinkingLevelMap?.off;
+    const id = metadata?.parameterIds?.effort
+      ? "effort"
+      : metadata?.parameterIds?.reasoning
+        ? "reasoning"
+        : null;
+    if (id && mapped) {
+      const existing = params.find((p) => p.id === "reasoning" || p.id === "effort");
+      if (existing) existing.value = mapped;
+      else params.push({ id, value: mapped });
+      return;
+    }
+    // grok/composer catalog is low|medium|high with no off/none. Leaving the
+    // default medium hides Hermes JSON in thinking (Direct parse_error).
+    for (let i = params.length - 1; i >= 0; i--) {
+      if (params[i].id === "reasoning" || params[i].id === "effort") {
+        params.splice(i, 1);
       }
     }
+    const lowest =
+      metadata.thinkingLevelMap?.minimal || metadata.thinkingLevelMap?.low;
+    if (id && lowest) params.push({ id, value: lowest });
     return;
   }
   const mapped = metadata.thinkingLevelMap[level];

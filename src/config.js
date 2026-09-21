@@ -19,6 +19,20 @@ export const THINKING_DISPLAY_DEFAULT = "indicator";
 export const WIRE_STATS_VALUES = new Set(["session", "request"]);
 export const WIRE_STATS_DEFAULT = "session";
 
+export const WEB_TOOLS_ON = "on";
+export const WEB_TOOLS_OFF = "off";
+export const WEB_TOOLS_DEFAULT = WEB_TOOLS_OFF;
+/** @type {ReadonlySet<string>} */
+const WEB_TOOLS_ON_ALIASES = new Set([
+  "on",
+  "allow",
+  "vps",
+  "vps_allowlisted",
+  "true",
+  "1",
+  "yes",
+]);
+
 /** Collapsed tool-call arg preview (physical TUI rows), then Ctrl+O. */
 export const TOOL_CALL_PREVIEW_LINES_DEFAULT = 20;
 export const TOOL_CALL_PREVIEW_LINES_MIN = 3;
@@ -53,6 +67,18 @@ export function coerceThinkingDisplay(raw) {
     }
   }
   return THINKING_DISPLAY_DEFAULT;
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {"on"|"off"}
+ */
+export function coerceWebTools(raw) {
+  if (typeof raw === "string" && WEB_TOOLS_ON_ALIASES.has(raw.trim().toLowerCase())) {
+    return WEB_TOOLS_ON;
+  }
+  if (raw === true) return WEB_TOOLS_ON;
+  return WEB_TOOLS_OFF;
 }
 
 /**
@@ -181,6 +207,7 @@ export function defaultConfigPath() {
  *   localToken: string,
  *   grants: string[],
  *   thinkingDisplay: "off"|"indicator"|"full",
+ *   webTools: "on"|"off",
  *   wireStats: "session"|"request",
  *   model: string,
  *   tui?: { toolCallPreviewLines?: number, toolCallExpandLines?: number },
@@ -208,6 +235,7 @@ export function loadConfig(path) {
     : [];
   const thinkingRaw =
     raw.thinkingDisplay !== undefined ? raw.thinkingDisplay : raw.thinking_display;
+  const webRaw = raw.webTools !== undefined ? raw.webTools : raw.web_tools;
   const wireRaw = raw.wireStats !== undefined ? raw.wireStats : raw.wire_stats;
   const tui = raw.tui && typeof raw.tui === "object" && !Array.isArray(raw.tui) ? raw.tui : {};
   return {
@@ -218,6 +246,7 @@ export function loadConfig(path) {
     localToken: String(raw.localToken || raw.local_token || ""),
     grants,
     thinkingDisplay: coerceThinkingDisplay(thinkingRaw),
+    webTools: coerceWebTools(webRaw),
     wireStats: coerceWireStats(wireRaw),
     model: coerceModel(raw.model),
     tui,
@@ -237,6 +266,7 @@ export function loadConfig(path) {
  *   unixPath?: string,
  *   grants: string[],
  *   thinkingDisplay: "off"|"indicator"|"full",
+ *   webTools: "on"|"off",
  *   wireStats: "session"|"request",
  *   toolCallPreviewLines: number,
  *   toolCallExpandLines: number,
@@ -259,6 +289,7 @@ export function resolveBridgeConnection() {
   const thinkingDisplay = coerceThinkingDisplay(
     process.env.BRIDGE_THINKING_DISPLAY || cfg?.thinkingDisplay
   );
+  const webTools = coerceWebTools(process.env.BRIDGE_WEB_TOOLS || cfg?.webTools);
   const wireStats = coerceWireStats(
     process.env.BRIDGE_WIRE_STATS || cfg?.wireStats
   );
@@ -270,6 +301,7 @@ export function resolveBridgeConnection() {
     unixPath,
     grants,
     thinkingDisplay,
+    webTools,
     wireStats,
     toolCallPreviewLines: tuiLimits.preview,
     toolCallExpandLines: tuiLimits.expand,

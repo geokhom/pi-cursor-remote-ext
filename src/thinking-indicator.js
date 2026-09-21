@@ -6,6 +6,7 @@ import { pokeTuiRender } from "./generation-speed.js";
 
 const WIDGET_ID = "cursor-remote-thinking";
 const STATUS_KEY = "cursor-remote-wire";
+const WEB_STATUS_KEY = "cursor-remote-web";
 const KEEP_ALIVE_MS = 1000;
 
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -179,6 +180,27 @@ export function setWireStatus(stats) {
 export function clearWireStatus() {
   try {
     uiRef?.setStatus?.(STATUS_KEY, undefined);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Footer: VPS WebSearch/WebFetch effective state (TUI cannot override VPS deny).
+ * @param {boolean} on
+ */
+export function setWebToolsStatus(on) {
+  if (!uiRef || typeof uiRef.setStatus !== "function") return;
+  try {
+    uiRef.setStatus(WEB_STATUS_KEY, `VPS web: ${on ? "on" : "off"}`);
+  } catch {
+    // ignore
+  }
+}
+
+export function clearWebToolsStatus() {
+  try {
+    uiRef?.setStatus?.(WEB_STATUS_KEY, undefined);
   } catch {
     // ignore
   }

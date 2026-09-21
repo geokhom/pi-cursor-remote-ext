@@ -210,36 +210,44 @@ export function hermesReviewResultText(text) {
 }
 
 /**
+ * Mutate the assistant message Hermes `completeSimple().result()` reads.
+ * Copying a new object is not enough if the drain still holds `output`.
+ * @param {object | undefined} message
+ * @returns {object}
+ */
+export function canonicalizeHermesAssistantMessage(message) {
+  const textBlocks = Array.isArray(message?.content)
+    ? message.content.filter(
+        (b) => b && b.type === "text" && typeof b.text === "string"
+      )
+    : [];
+  const joined = textBlocks.map((b) => b.text).join("\n");
+  const text = hermesReviewResultText(joined);
+  const block = { type: "text", text };
+  if (message && typeof message === "object") {
+    if (Array.isArray(message.content)) {
+      message.content.length = 0;
+      message.content.push(block);
+    } else {
+      message.content = [block];
+    }
+    return message;
+  }
+  return { role: "assistant", content: [block] };
+}
+
+/**
  * @param {object} ev
  * @returns {object}
  */
-function unwrapHermesJsonEvent(ev) {
+export function unwrapHermesJsonEvent(ev) {
   if (!ev || typeof ev !== "object") return ev;
   if (ev.type === "done" && ev.message) {
-    const rawContent = Array.isArray(ev.message.content) ? ev.message.content : [];
-    const content = rawContent.map((block) => {
-      if (block && block.type === "text" && typeof block.text === "string") {
-        return { ...block, text: unwrapHermesJsonText(block.text) };
-      }
-      return block;
-    });
-    const joined = content
-      .filter((b) => b && b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text)
-      .join("\n");
-    if (!parseHermesOperationsJson(joined)) {
-      return {
-        ...ev,
-        message: {
-          ...ev.message,
-          content: [{ type: "text", text: hermesReviewResultText(joined) }],
-        },
-      };
-    }
-    return { ...ev, message: { ...ev.message, content } };
+    canonicalizeHermesAssistantMessage(ev.message);
+    return ev;
   }
   if (ev.type === "text_end" && typeof ev.content === "string") {
-    return { ...ev, content: unwrapHermesJsonText(ev.content) };
+    return { ...ev, content: hermesReviewResultText(ev.content) };
   }
   return ev;
 }
@@ -398,7 +406,9 @@ export async function runSummarizationViaBridge(args) {
   // Hermes review parses visible assistant text as JSON. Session thinkingLevel
   // (medium) puts the JSON in thinking, which summarize drops (thinking_display
   // off) → Direct parse_error. Compact summaries can keep the caller's level.
-  const thinkingLevel = looksLikeHermesOperations(text)
+  const hermesReview =
+    contextLooksLikeHermesReview(context) || looksLikeHermesOperations(text);
+  const thinkingLevel = hermesReview
     ? "off"
     : options?.thinkingLevel ||
       options?.reasoning ||
@@ -440,7 +450,7 @@ export async function runSummarizationViaBridge(args) {
     });
   };
   keepAlive = setInterval(pokeKeepAlive, SUMMARIZE_KEEPALIVE_MS);
-  if (looksLikeHermesOperations(text)) {
+  if (hermesReview) {
     clearInterval(keepAlive);
     keepAlive = null;
   }
@@ -461,7 +471,7 @@ export async function runSummarizationViaBridge(args) {
     skipStart: true,
     onStreamEvent: (ev) => {
       if (ev?.type === "_end" || ev?.type === "start") return;
-      if (looksLikeHermesOperations(text)) {
+      if (hermesReview) {
         ev = unwrapHermesJsonEvent(ev);
       }
       stream.push(ev);

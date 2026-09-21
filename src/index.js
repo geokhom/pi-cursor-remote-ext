@@ -38,7 +38,7 @@ import {
 } from "./config.js";
 import { registerShadowTools } from "./shadow-tools.js";
 import { takeFollowUp } from "./result-stash.js";
-import { bindThinkingUi, clearThinkingIndicator } from "./thinking-indicator.js";
+import { bindThinkingUi, clearThinkingIndicator, setWebToolsStatus } from "./thinking-indicator.js";
 import {
   buildCursorModelSelection,
   fallbackProviderModels,
@@ -85,11 +85,17 @@ async function ensureCursorRemoteSession(ctx) {
   try {
     const s = await client.getSession();
     ready = Boolean(s?.ok && s.ready && s.cwd);
+    paintWebToolsFooter(s);
   } catch {
     ready = false;
   }
   if (!ready) {
     await handshakeWorkspaceCwd(client, ctx || {}, ctx);
+    try {
+      paintWebToolsFooter(await client.getSession());
+    } catch {
+      // keep previous footer
+    }
   }
   const next = await fetchProviderModels(client, {
     timeoutMs: ready ? 8000 : 20000,
@@ -106,6 +112,13 @@ async function ensureCursorRemoteSession(ctx) {
   if (cur && next.length) {
     resolveModelOrFallback(cur, next);
   }
+}
+
+/**
+ * @param {{ web_tools_effective?: string, web_tools?: string } | null | undefined} snap
+ */
+function paintWebToolsFooter(snap) {
+  setWebToolsStatus(snap?.web_tools_effective === "on");
 }
 
 function createProviderConfig(models) {
@@ -428,6 +441,7 @@ export default async function register(pi) {
       shadowApi?.syncActive?.(_lastModel);
       if (ctx?.ui) lastUi = ctx.ui;
       installGenerationSpeedFooter(ctx);
+      setWebToolsStatus(conn.webTools === "on");
       try {
         await registerCursorRemoteCompatApi(streamSimple, {
           importMetaUrl: import.meta.url,
@@ -566,6 +580,45 @@ export default async function register(pi) {
         }
       },
     });
+    pi.registerCommand("cursor-remote-web", {
+      description: "Toggle VPS WebSearch/WebFetch (reopens session)",
+      handler: async (args, ctx) => {
+        if (!client) {
+          ctx?.ui?.notify?.("Bridge not configured; cannot toggle VPS web.", "warning");
+          return;
+        }
+        try {
+          const snap = await client.getSession();
+          const cur = snap?.web_tools === "on";
+          const raw = Array.isArray(args) ? args[0] : args;
+          const a = String(raw || "").trim().toLowerCase();
+          let next = cur ? "off" : "on";
+          if (a === "on" || a === "off") next = a;
+          /** @type {{ web_tools: string, cwd?: string }} */
+          const body = { web_tools: next };
+          if (typeof snap?.cwd === "string" && snap.cwd) body.cwd = snap.cwd;
+          const out = await client.setSession(body);
+          paintWebToolsFooter(out);
+          const effective = out?.web_tools_effective === "on";
+          if (next === "on" && !effective) {
+            ctx?.ui?.notify?.(
+              "VPS web requested on, but the network owner denied it (CONTOUR_WEB_TOOLS).",
+              "warning"
+            );
+          } else {
+            ctx?.ui?.notify?.(
+              `VPS web ${effective ? "on" : "off"} (session reopened).`,
+              "info"
+            );
+          }
+        } catch (err) {
+          ctx?.ui?.notify?.(
+            `VPS web toggle failed: ${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      },
+    });
     const cancelRun = async (_args, ctx) => {
       if (!client) {
         ctx?.ui?.notify?.("Bridge not configured; cannot cancel.", "warning");
@@ -634,8 +687,10 @@ export {
   summarizationPromptFromContext,
   contextLooksLikeHermesReview,
   unwrapHermesJsonText,
+  unwrapHermesJsonEvent,
   parseHermesOperationsJson,
   hermesReviewResultText,
+  canonicalizeHermesAssistantMessage,
 } from "./compaction.js";
 export {
   formatToolArgs,
@@ -658,6 +713,7 @@ export {
   loadConfig,
   resolveBridgeConnection,
   coerceThinkingDisplay,
+  coerceWebTools,
   coerceWireStats,
   coerceModel,
   coerceTuiToolCallLimits,
@@ -674,6 +730,8 @@ export {
   clearThinkingIndicator,
   setWireStatus,
   clearWireStatus,
+  setWebToolsStatus,
+  clearWebToolsStatus,
   formatBytes,
 } from "./thinking-indicator.js";
 export {
