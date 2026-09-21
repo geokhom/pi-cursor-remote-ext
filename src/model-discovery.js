@@ -129,8 +129,13 @@ function mapComparableLevel(parameter, level) {
 export function getThinkingLevelMap(item) {
   const reasoningParameter = getParameter(item, "reasoning");
   const effortParameter = getParameter(item, "effort");
+  const reasoningEffortParameter = getParameter(item, "reasoning_effort");
   const thinkingParameter = getParameter(item, "thinking");
-  const valueParameter = effortParameter ?? reasoningParameter ?? thinkingParameter;
+  const valueParameter =
+    effortParameter ??
+    reasoningParameter ??
+    reasoningEffortParameter ??
+    thinkingParameter;
   if (!valueParameter) return undefined;
 
   if (valueParameter.id === "thinking" && hasBooleanValues(valueParameter)) {
@@ -149,6 +154,8 @@ export function getThinkingLevelMap(item) {
     off:
       getParameterValue(reasoningParameter, "none") ??
       getParameterValue(reasoningParameter, "off") ??
+      getParameterValue(reasoningEffortParameter, "none") ??
+      getParameterValue(reasoningEffortParameter, "off") ??
       getParameterValue(thinkingParameter, "false"),
     minimal: mapComparableLevel(valueParameter, "minimal"),
     low: mapComparableLevel(valueParameter, "low"),
@@ -290,16 +297,97 @@ const MAX_PICKER_MODELS = 96;
 
 /**
  * @param {object[]} items
+ * @param {{ preferPiModelId?: string | null }} [options]
+ * The picker stops at 96 entries. `preferPiModelId` is emitted first from the
+ * real catalog item so a saved grok variant keeps its thinkingLevelMap
+ * instead of a reasoning-less stub added after the cap.
  * @returns {object[]}
  */
-export function registerModelItems(items) {
+export function registerModelItems(items, options = {}) {
   const store = metadataByPiModelId();
   store.clear();
   const used = new Set();
   const configs = [];
+  const preferRaw =
+    typeof options.preferPiModelId === "string" ? options.preferPiModelId.trim() : "";
+  const prefer = preferRaw ? parsePiModelId(preferRaw) : null;
   const sorted = [...(items || [])].sort((a, b) =>
     String(a.id || "").localeCompare(String(b.id || ""))
   );
+
+  /**
+   * @param {object} item
+   * @param {string | undefined} context
+   * @param {boolean | undefined} fastOverride
+   * @param {Array<{id:string,value:string}>} defaultParams
+   */
+  function pushVariant(item, context, fastOverride, defaultParams) {
+    const contextParams = context
+      ? replaceParam(defaultParams, "context", context)
+      : defaultParams;
+    const params =
+      fastOverride === undefined
+        ? contextParams
+        : replaceParam(contextParams, "fast", fastOverride ? "true" : "false");
+    const piModelId = encodePiModelId(item.id, context, fastOverride);
+    if (used.has(piModelId)) return false;
+    used.add(piModelId);
+    const thinkingLevelMap = getThinkingLevelMap(item);
+    const explicitWindow =
+      typeof item.context_window === "number"
+        ? item.context_window
+        : typeof item.contextWindow === "number"
+          ? item.contextWindow
+          : undefined;
+    const contextWindow = resolveContextWindow(item.id, context, explicitWindow);
+    const entry = {
+      piModelId,
+      baseModelId: item.id,
+      selectionModelId: item.id,
+      displayName: item.display_name || item.displayName || item.id,
+      defaultParams: cloneParams(params),
+      context,
+      contextWindow,
+      supportsFast: getParameter(item, "fast") !== undefined,
+      defaultFast: getParamValue(params, "fast")?.toLowerCase() === "true",
+      fastOverride,
+      supportsReasoning: thinkingLevelMap !== undefined,
+      thinkingLevelMap,
+        parameterIds: {
+          context: getParameter(item, "context") !== undefined,
+          reasoning: getParameter(item, "reasoning") !== undefined,
+          effort: getParameter(item, "effort") !== undefined,
+          reasoningEffort: getParameter(item, "reasoning_effort") !== undefined,
+          thinking: getParameter(item, "thinking") !== undefined,
+          fast: getParameter(item, "fast") !== undefined,
+        },
+    };
+    store.set(piModelId, entry);
+    configs.push({
+      id: piModelId,
+      name: getModelName(item, context, fastOverride),
+      reasoning: Boolean(thinkingLevelMap),
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      input: ["text"],
+      cost: { ...ZERO_COST },
+      // Real window stays on metadata; pi uses this for auto-compact.
+      contextWindow: PI_AUTOCOMPACT_DISABLE_WINDOW,
+      maxTokens: FALLBACK_MAX_TOKENS,
+    });
+    return true;
+  }
+
+  if (prefer) {
+    const preferred = sorted.find((item) => item && item.id === prefer.baseId);
+    if (preferred) {
+      pushVariant(
+        preferred,
+        prefer.context,
+        prefer.fastOverride,
+        getDefaultParams(preferred)
+      );
+    }
+  }
 
   for (const item of sorted) {
     if (!item || typeof item.id !== "string" || !item.id) continue;
@@ -310,58 +398,8 @@ export function registerModelItems(items) {
       getParameter(item, "fast") === undefined ? [undefined] : [undefined, true, false];
 
     for (const context of contexts) {
-      const contextParams = context
-        ? replaceParam(defaultParams, "context", context)
-        : defaultParams;
       for (const fastOverride of fastOverrides) {
-        const params =
-          fastOverride === undefined
-            ? contextParams
-            : replaceParam(contextParams, "fast", fastOverride ? "true" : "false");
-        const piModelId = encodePiModelId(item.id, context, fastOverride);
-        if (used.has(piModelId)) continue;
-        used.add(piModelId);
-        const thinkingLevelMap = getThinkingLevelMap(item);
-        const explicitWindow =
-          typeof item.context_window === "number"
-            ? item.context_window
-            : typeof item.contextWindow === "number"
-              ? item.contextWindow
-              : undefined;
-        const contextWindow = resolveContextWindow(item.id, context, explicitWindow);
-        const entry = {
-          piModelId,
-          baseModelId: item.id,
-          selectionModelId: item.id,
-          displayName: item.display_name || item.displayName || item.id,
-          defaultParams: cloneParams(params),
-          context,
-          contextWindow,
-          supportsFast: getParameter(item, "fast") !== undefined,
-          defaultFast: getParamValue(params, "fast")?.toLowerCase() === "true",
-          fastOverride,
-          supportsReasoning: thinkingLevelMap !== undefined,
-          thinkingLevelMap,
-          parameterIds: {
-            context: getParameter(item, "context") !== undefined,
-            reasoning: getParameter(item, "reasoning") !== undefined,
-            effort: getParameter(item, "effort") !== undefined,
-            thinking: getParameter(item, "thinking") !== undefined,
-            fast: getParameter(item, "fast") !== undefined,
-          },
-        };
-        store.set(piModelId, entry);
-        configs.push({
-          id: piModelId,
-          name: getModelName(item, context, fastOverride),
-          reasoning: Boolean(thinkingLevelMap),
-          ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-          input: ["text"],
-          cost: { ...ZERO_COST },
-          // Real window stays on metadata; pi uses this for auto-compact.
-          contextWindow: PI_AUTOCOMPACT_DISABLE_WINDOW,
-          maxTokens: FALLBACK_MAX_TOKENS,
-        });
+        pushVariant(item, context, fastOverride, defaultParams);
         if (configs.length >= MAX_PICKER_MODELS) {
           return configs;
         }
@@ -441,7 +479,9 @@ export function bootstrapProviderModels() {
   const composer = byId.get(DEFAULT_MODEL);
   if (composer) byId.set(DEFAULT_MODEL, withFastParam(composer));
   return pinProviderModel(
-    registerModelItems([...byId.values()]),
+    registerModelItems([...byId.values()], {
+      preferPiModelId: loadPinnedCursorModelId(),
+    }),
     loadPinnedCursorModelId()
   );
 }
@@ -548,6 +588,15 @@ export function knownPiModelIds() {
  * @param {Array<{id:string,value:string}>} params
  * @param {string} level
  */
+function effortParamId(parameterIds) {
+  if (parameterIds?.effort) return "effort";
+  if (parameterIds?.reasoning) return "reasoning";
+  if (parameterIds?.reasoningEffort) return "reasoning_effort";
+  return null;
+}
+
+const EFFORT_PARAM_IDS = new Set(["effort", "reasoning", "reasoning_effort"]);
+
 function applyThinkingLevel(metadata, params, level) {
   if (!metadata?.thinkingLevelMap || level === "off") {
     if (metadata?.parameterIds?.thinking) {
@@ -556,13 +605,9 @@ function applyThinkingLevel(metadata, params, level) {
       else params.push({ id: "thinking", value: "false" });
     }
     const mapped = metadata.thinkingLevelMap?.off;
-    const id = metadata?.parameterIds?.effort
-      ? "effort"
-      : metadata?.parameterIds?.reasoning
-        ? "reasoning"
-        : null;
+    const id = effortParamId(metadata?.parameterIds);
     if (id && mapped) {
-      const existing = params.find((p) => p.id === "reasoning" || p.id === "effort");
+      const existing = params.find((p) => EFFORT_PARAM_IDS.has(p.id));
       if (existing) existing.value = mapped;
       else params.push({ id, value: mapped });
       return;
@@ -570,9 +615,7 @@ function applyThinkingLevel(metadata, params, level) {
     // grok/composer catalog is low|medium|high with no off/none. Leaving the
     // default medium hides Hermes JSON in thinking (Direct parse_error).
     for (let i = params.length - 1; i >= 0; i--) {
-      if (params[i].id === "reasoning" || params[i].id === "effort") {
-        params.splice(i, 1);
-      }
+      if (EFFORT_PARAM_IDS.has(params[i].id)) params.splice(i, 1);
     }
     const lowest =
       metadata.thinkingLevelMap?.minimal || metadata.thinkingLevelMap?.low;
@@ -581,16 +624,13 @@ function applyThinkingLevel(metadata, params, level) {
   }
   const mapped = metadata.thinkingLevelMap[level];
   if (mapped == null) return;
-  if (metadata.parameterIds.effort) {
-    const existing = params.find((p) => p.id === "effort");
-    if (existing) existing.value = mapped;
-    else params.push({ id: "effort", value: mapped });
-    return;
-  }
-  if (metadata.parameterIds.reasoning) {
-    const existing = params.find((p) => p.id === "reasoning");
-    if (existing) existing.value = mapped;
-    else params.push({ id: "reasoning", value: mapped });
+  const id = effortParamId(metadata.parameterIds);
+  if (id) {
+    const existing = params.find((p) => EFFORT_PARAM_IDS.has(p.id));
+    if (existing) {
+      existing.id = id;
+      existing.value = mapped;
+    } else params.push({ id, value: mapped });
     return;
   }
   if (metadata.parameterIds.thinking) {

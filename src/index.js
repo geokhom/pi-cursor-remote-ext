@@ -175,7 +175,9 @@ async function fetchProviderModels(client, opts = {}) {
     try {
       const json = await client.getModels();
       if (json?.ok && Array.isArray(json.models) && json.models.length) {
-        last = registerModelItems(json.models);
+        last = registerModelItems(json.models, {
+          preferPiModelId: loadPinnedCursorModelId(),
+        });
         if (json.live || json.models.length > 3) {
           try {
             saveModelsCache(json.models);
