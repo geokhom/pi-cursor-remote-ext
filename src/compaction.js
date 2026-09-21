@@ -54,14 +54,18 @@ export function isSummarizationRequest(options) {
 /**
  * Isolated LLM calls that must not hit the coding Agent (empty hello tools).
  * Covers Pi `/compact` (`toolChoice: "none"`) and in-process `completeSimple`
- * from extensions such as pi-hermes-memory (system prompt + few messages,
- * no tool snapshot). Coding turns always snapshot active tools.
+ * from extensions such as pi-hermes-memory.
+ *
+ * Hermes often snapshots the session tool list and/or splits the transcript
+ * into many messages. Those must still go to the summarize sidecar — otherwise
+ * the dump is posted as a coding `user_prompt` and the Agent starts tools.
  *
  * @param {object | undefined} context
  * @param {object | undefined} options
  */
 export function isSideChannelCompletion(context, options) {
   if (isSummarizationRequest(options)) return true;
+  if (contextLooksLikeHermesReview(context)) return true;
   const tools = context?.tools;
   if (Array.isArray(tools) && tools.length > 0) return false;
   const sys =
@@ -96,7 +100,7 @@ export const SUMMARIZE_TEXT_MAX = 512_000;
 const SUMMARIZE_HEAD_KEEP = 12_000;
 const SUMMARIZE_TRUNC_MARKER = "\n\n[truncated for summarization]\n";
 
-function looksLikeHermesOperations(text) {
+export function looksLikeHermesOperations(text) {
   const head = String(text || "")
     .slice(0, 8000)
     .toLowerCase();
@@ -105,6 +109,40 @@ function looksLikeHermesOperations(text) {
     head.includes('"operations"') ||
     head.includes("'operations'")
   );
+}
+
+/**
+ * @param {object | undefined} message
+ */
+function messagePlainText(message) {
+  if (!message) return "";
+  if (typeof message.content === "string") return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("\n");
+  }
+  return "";
+}
+
+/**
+ * Hermes review prompt: operations schema in systemPrompt / system messages,
+ * or in the current user dump. Do not scan older user turns — a past review
+ * dump left in the session must not reroute later coding streamSimple calls.
+ *
+ * @param {object | undefined} context
+ */
+export function contextLooksLikeHermesReview(context) {
+  if (looksLikeHermesOperations(context?.systemPrompt)) return true;
+  if (looksLikeHermesOperations(lastUserText(context))) return true;
+  const messages = context?.messages;
+  if (!Array.isArray(messages)) return false;
+  for (const m of messages) {
+    if (m?.role !== "system") continue;
+    if (looksLikeHermesOperations(messagePlainText(m))) return true;
+  }
+  return false;
 }
 
 /**

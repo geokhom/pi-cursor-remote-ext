@@ -632,6 +632,7 @@ export {
   isNewUserTurn,
   runSummarizationViaBridge,
   summarizationPromptFromContext,
+  contextLooksLikeHermesReview,
 } from "./compaction.js";
 export {
   formatToolArgs,
