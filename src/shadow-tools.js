@@ -213,9 +213,10 @@ function makeShadowTool(displayName) {
       if (state && context.executionStarted && state.startedAt === undefined) {
         state.startedAt = Date.now();
       }
+      const expanded = Boolean(context?.expanded);
       return panelLinesComponent(
         (width) =>
-          formatToolCallLines(displayName, args, { width, theme }),
+          formatToolCallLines(displayName, args, { width, theme, expanded }),
         { theme, precolored: true }
       );
     },

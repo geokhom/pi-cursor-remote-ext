@@ -607,8 +607,10 @@ export async function applyEnvGrants(client, env = process.env) {
   return Array.isArray(res.grants) ? res.grants : wanted;
 }
 
-/** Max physical TUI lines for a tool_call header (then a "more" hint). */
-export const TOOL_CALL_PREVIEW_LINES = 12;
+/** Max physical TUI lines for a collapsed tool_call header (then a Ctrl+O hint). */
+export const TOOL_CALL_PREVIEW_LINES = 40;
+/** Max physical TUI lines after Ctrl+O expands the call header. */
+export const TOOL_CALL_EXPAND_LINES = 200;
 
 /**
  * Unwrap SDK/MCP envelopes `{toolName, args:{…}}` without touching string whitespace.
@@ -656,7 +658,7 @@ export { wrapToWidth };
  * Empty heredoc lines become a single space so Box can fill toolSuccessBg.
  * @param {string | string[]} lines
  * @param {number} [width]
- * @param {{ maxLines?: number }} [opts]
+ * @param {{ maxLines?: number, expandHint?: boolean }} [opts]
  * @returns {string[]}
  */
 export function layoutToolPanelLines(lines, width = 0, opts = {}) {
@@ -682,7 +684,9 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   const maxLines = opts.maxLines;
   if (maxLines && physical.length > maxLines) {
     const skipped = physical.length - maxLines;
-    const hint = `… (${skipped} more lines)`;
+    const hint = opts.expandHint
+      ? `... (${skipped} more lines, Ctrl+O to expand)`
+      : `… (${skipped} more lines)`;
     const extra = w > 0 ? wrapToWidth(hint, w) : [hint];
     return [...physical.slice(0, maxLines), ...extra];
   }
@@ -1037,8 +1041,24 @@ function truncateArgPreview(value, max = 80) {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+const BLOCK_ARG_KEY_RE = /^(sql|query|statement|command|code|script|content|text|prompt|q)$/i;
+
+/**
+ * Long / SQL-like string args go on their own wrapped lines, not `key=80chars…`.
+ * @param {string} key
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function shouldExpandArgValue(key, value) {
+  if (typeof value !== "string") return false;
+  if (LINE_BREAK_RE.test(value)) return true;
+  if (BLOCK_ARG_KEY_RE.test(key)) return true;
+  return value.length > 80;
+}
+
 /**
  * MCP / unknown-tool call: name + key=val (pi-cursor-sdk fallback), keep newlines.
+ * SQL / long strings are full extra lines (wrap in layout), not a one-line preview.
  * @param {string} displayName
  * @param {Record<string, unknown>} o
  * @returns {string[]}
@@ -1054,8 +1074,8 @@ function formatMcpToolCallLines(displayName, o) {
   const shown = entries.slice(0, 8);
   for (const [key, value] of shown) {
     if (value == null) continue;
-    if (typeof value === "string" && LINE_BREAK_RE.test(value)) {
-      extraLines.push(`${key}:`, ...value.split(LINE_BREAK_RE));
+    if (shouldExpandArgValue(key, value)) {
+      extraLines.push(`${key}:`, ...String(value).split(LINE_BREAK_RE));
     } else if (
       typeof value === "string" ||
       typeof value === "number" ||
@@ -1354,29 +1374,36 @@ export function applyToolCallTheme(displayName, lines, theme) {
   return lines.map((line, index) => {
     const { body: s, suffix } = splitTimeoutSuffix(String(line ?? ""));
     const painted = (() => {
+      if (/more lines/.test(s)) return dim(s);
       if (name === "grep" || name === "rg") {
         const m = s.match(/^(grep) (\/(?:\\\/|[^/])*\/)( in .*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
+        if (index > 0) return accent(s);
       }
       if (name === "glob") {
         const m = s.match(/^(find) (.+?)( in .*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
+        if (index > 0) return accent(s);
       }
       if (name === "list_dir" || name === "ls") {
         const m = s.match(/^(ls) (.*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}`;
+        if (index > 0) return accent(s);
       }
       if (name === "read_file" || name === "read") {
         const m = s.match(/^(read) (.*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}`;
+        if (index > 0) return accent(s);
       }
       if (name === "mkdir") {
         const m = s.match(/^(mkdir) (.*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}`;
+        if (index > 0) return accent(s);
       }
       if (name === "delete_path" || name === "delete") {
         const m = s.match(/^(delete) (.*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}`;
+        if (index > 0) return accent(s);
       }
       if (name === "ping") return title(s || "ping");
       if (/^WebSearch |^WebFetch /.test(s)) {
@@ -1418,11 +1445,11 @@ export function applyToolCallTheme(displayName, lines, theme) {
         if (index === 0) {
           const sp = s.indexOf(" ");
           if (sp < 0) return title(s);
-          return `${title(s.slice(0, sp))} ${out(s.slice(sp + 1))}`;
+          return `${title(s.slice(0, sp))} ${accent(s.slice(sp + 1))}`;
         }
-        return out(s);
+        return accent(s);
       }
-      return index === 0 ? title(s) : out(s);
+      return index === 0 ? title(s) : accent(s);
     })();
     return suffix ? `${painted}${dim(suffix)}` : painted;
   });
@@ -1430,14 +1457,18 @@ export function applyToolCallTheme(displayName, lines, theme) {
 
 /**
  * Multi-line tool_call header for pi TUI (sed scripts, write_file body).
+ * Wrap first, then theme, so wrapped argument rows keep accent (ANSI wrap
+ * would otherwise leave only the first physical row colored).
  * Pass `width` from render() so long one-liners wrap instead of ending in `…`.
  * @param {string} displayName
  * @param {unknown} args
- * @param {{ maxLines?: number, width?: number, theme?: object }} [opts]
+ * @param {{ maxLines?: number, width?: number, theme?: object, expanded?: boolean }} [opts]
  * @returns {string[]}
  */
 export function formatToolCallLines(displayName, args, opts = {}) {
-  const maxLines = opts.maxLines ?? TOOL_CALL_PREVIEW_LINES;
+  const expanded = Boolean(opts.expanded);
+  const maxLines =
+    opts.maxLines ?? (expanded ? TOOL_CALL_EXPAND_LINES : TOOL_CALL_PREVIEW_LINES);
   const width = opts.width;
   const o = unwrapToolArgs(args);
   const native = formatNativeToolCallLines(String(displayName || "tool"), o);
@@ -1454,6 +1485,7 @@ export function formatToolCallLines(displayName, args, opts = {}) {
         : editLike
           ? "edit "
           : `$ ${displayName} `;
+    const sqlBlock = firstNonEmptyString(o.sql, o.query, o.statement);
     if (typeof o.command === "string") {
       const parts = o.command.split(LINE_BREAK_RE);
       logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
@@ -1483,6 +1515,8 @@ export function formatToolCallLines(displayName, args, opts = {}) {
       const fileContent =
         typeof o.content === "string" ? o.content : String(o.contents ?? "");
       logical = [`${prefix}${o.path}`, ...fileContent.split(LINE_BREAK_RE)];
+    } else if (sqlBlock) {
+      logical = [`$ ${displayName}`, ...sqlBlock.split(LINE_BREAK_RE)];
     } else {
       const raw = formatToolArgs(args);
       if (!raw) logical = [`$ ${displayName}`];
@@ -1494,16 +1528,22 @@ export function formatToolCallLines(displayName, args, opts = {}) {
   }
   if (!logical.length) logical.push(`$ ${displayName}`);
   const timeoutSuffix = formatTimeoutSuffix(explicitTimeoutSeconds(o));
+  const rows = layoutToolPanelLines(logical, width, {
+    maxLines,
+    expandHint: !expanded,
+  });
   if (timeoutSuffix) {
-    logical[logical.length - 1] = `${logical[logical.length - 1] || ""}${timeoutSuffix}`;
+    const last = rows[rows.length - 1] || "";
+    const isHint = last.includes("more lines");
+    if (isHint || last.includes("(timeout ")) {
+      if (!last.includes("(timeout ")) rows.push(timeoutSuffix.trim());
+    } else {
+      const wrapped = layoutToolPanelLines([`${last}${timeoutSuffix}`], width);
+      rows.splice(rows.length - 1, 1, ...wrapped);
+    }
   }
   if (opts.theme) {
-    logical = applyToolCallTheme(String(displayName || "tool"), logical, opts.theme);
-  }
-  const rows = layoutToolPanelLines(logical, width, { maxLines });
-  if (timeoutSuffix && !rows.some((r) => r.includes("(timeout "))) {
-    const label = timeoutSuffix.trim();
-    rows.push(opts.theme && typeof opts.theme.fg === "function" ? opts.theme.fg("dim", label) : label);
+    return applyToolCallTheme(String(displayName || "tool"), rows, opts.theme);
   }
   return rows;
 }
