@@ -5,7 +5,9 @@
 import { pokeTuiRender } from "./generation-speed.js";
 
 const WIDGET_ID = "cursor-remote-thinking";
-const STATUS_KEY = "cursor-remote-wire";
+// Sorted with other extension statuses (localeCompare). "mcp" is pi-mcp-adapter.
+// z- prefix keeps wire traffic after VPS web and MCP.
+const STATUS_KEY = "z-cursor-remote-wire";
 const WEB_STATUS_KEY = "cursor-remote-web";
 const KEEP_ALIVE_MS = 1000;
 

@@ -62,6 +62,9 @@ import {
 } from "./compaction.js";
 import { registerCursorRemoteCompatApi } from "./compat-api.js";
 import { separateRequestStatsMarkdown } from "./usage-accounting.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** @type {import('./types.js').ExtensionAPI | null} */
 let _piRef = null;
@@ -73,6 +76,46 @@ let _bridgeClient = null;
 let _baseUrl = "http://127.0.0.1:18765";
 /** @type {unknown} */
 let _lastModel = null;
+/** One startup line: real TUI / bridge / relay versions, not the repo pin. */
+let _versionsAnnounced = false;
+
+function runningExtensionVersion() {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "?";
+  } catch {
+    return "?";
+  }
+}
+
+/**
+ * @param {BridgeClient | null} client
+ * @param {{ ui?: { notify?: Function } } | null | undefined} ctx
+ */
+async function announceComponentVersions(client, ctx) {
+  if (_versionsAnnounced) return;
+  _versionsAnnounced = true;
+  const tui = runningExtensionVersion();
+  let bridge = "—";
+  let relay = "—";
+  if (client && typeof client.getSession === "function") {
+    try {
+      const s = await client.getSession();
+      if (typeof s?.pkg_ver === "string" && s.pkg_ver) bridge = s.pkg_ver;
+      if (typeof s?.relay_ver === "string" && s.relay_ver) relay = s.relay_ver;
+    } catch {
+      // bridge not reachable
+    }
+  }
+  const known = [tui, bridge, relay].filter((v) => v !== "?" && v !== "—");
+  const mismatch = known.length >= 2 && new Set(known).size > 1;
+  const missing = bridge === "—" || relay === "—";
+  ctx?.ui?.notify?.(
+    `TUI ${tui} · Bridge ${bridge} · Relay ${relay}`,
+    mismatch || missing ? "warning" : "info"
+  );
+}
 
 /**
  * After bridge restart, pi may still be up without a VPS session — handshake
@@ -142,18 +185,36 @@ function registerCursorRemoteProvider(pi, models) {
 }
 
 /**
- * Session files restore the last model (often llama-cpp) even after the user
- * set a Cursor Remote default. Switch to that default once it is registered.
+ * Session files and /reload keep the previous model object. Same id can still
+ * be the stub registered before reasoning_effort was mapped, so the thinking
+ * menu stays at off. Rebind to the registry model when its thinking map differs.
  * @param {import('./types.js').ExtensionAPI & { setModel?: Function, modelRegistry?: { getModel?: Function } }} pi
- * @param {{ model?: { id?: string, provider?: string } } | null | undefined} ctx
+ * @param {{ model?: { id?: string, provider?: string, reasoning?: boolean, thinkingLevelMap?: Record<string, string|null> } } | null | undefined} ctx
  */
+function thinkingSignature(model) {
+  const map = model?.thinkingLevelMap;
+  if (!map || typeof map !== "object") return model?.reasoning ? "reasoning" : "";
+  return Object.entries(map)
+    .filter(([, value]) => value != null && value !== "")
+    .map(([key, value]) => `${key}=${value}`)
+    .join(",");
+}
+
 async function applySavedDefaultModel(pi, ctx) {
   const pinned = loadPinnedCursorModelId();
-  if (!pinned || typeof pi?.setModel !== "function") return false;
   const cur = ctx?.model;
-  if (cur?.provider === "cursor-remote" && cur?.id === pinned) return true;
-  const model = pi.modelRegistry?.getModel?.("cursor-remote", pinned);
+  const targetId = (cur?.provider === "cursor-remote" && cur.id) || pinned;
+  if (!targetId || typeof pi?.setModel !== "function") return false;
+  const model = pi.modelRegistry?.getModel?.("cursor-remote", targetId);
   if (!model) return false;
+  const sameId = cur?.provider === "cursor-remote" && cur.id === model.id;
+  if (
+    sameId &&
+    Boolean(cur?.reasoning) === Boolean(model.reasoning) &&
+    thinkingSignature(cur) === thinkingSignature(model)
+  ) {
+    return true;
+  }
   try {
     await pi.setModel(model);
     return true;
@@ -470,6 +531,10 @@ export default async function register(pi) {
       if (ctx?.ui) lastUi = ctx.ui;
       installGenerationSpeedFooter(ctx);
       setWebToolsStatus(conn.webTools === "on");
+      if (!client) {
+        await announceComponentVersions(null, ctx);
+        return;
+      }
       try {
         await registerCursorRemoteCompatApi(streamSimple, {
           importMetaUrl: import.meta.url,
@@ -477,12 +542,12 @@ export default async function register(pi) {
       } catch {
         // hermes completeSimple stays on subprocess if host pi-ai is hidden
       }
-      if (!client) return;
       try {
         await ensureCursorRemoteSession(ctx);
       } catch {
         // notify already emitted from handshake
       }
+      await announceComponentVersions(client, ctx);
       try {
         const mcpSnap = await shadowApi?.syncMcpShadows?.(client, ctx?.model);
         const errs = mcpSnap?.errors;
