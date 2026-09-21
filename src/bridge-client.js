@@ -608,7 +608,7 @@ export async function applyEnvGrants(client, env = process.env) {
 }
 
 /** Max physical TUI lines for a collapsed tool_call header (then a Ctrl+O hint). */
-export const TOOL_CALL_PREVIEW_LINES = 40;
+export const TOOL_CALL_PREVIEW_LINES = 20;
 /** Max physical TUI lines after Ctrl+O expands the call header. */
 export const TOOL_CALL_EXPAND_LINES = 200;
 
@@ -653,9 +653,26 @@ export function unwrapToolArgs(args) {
 
 export { wrapToWidth };
 
+/** `-78 content` / `+78 content` / ` 75 content` (stock pi-cursor-sdk). */
+const DIFF_NUMBERED_RE = /^([+\- ]\d+ )/;
+/** Legacy `- content` / `+ content` from args preview. */
+const DIFF_LEGACY_RE = /^([+\-] )/;
+
+/**
+ * Columns to hang-wrap so wrapped diff rows keep the +/- / line-number gutter.
+ * @param {string} line
+ * @returns {number}
+ */
+export function diffLineHangWidth(line) {
+  const s = String(line ?? "");
+  const m = DIFF_NUMBERED_RE.exec(s) || DIFF_LEGACY_RE.exec(s);
+  return m ? m[1].length : 0;
+}
+
 /**
  * Map logical tool-panel lines → TUI rows: one array entry per painted row.
  * Empty heredoc lines become a single space so Box can fill toolSuccessBg.
+ * Diff lines hang-wrap so continuation rows stay in the content column.
  * @param {string | string[]} lines
  * @param {number} [width]
  * @param {{ maxLines?: number, expandHint?: boolean }} [opts]
@@ -674,7 +691,8 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   /** @type {string[]} */
   const physical = [];
   for (const line of logical) {
-    const chunks = w > 0 ? wrapToWidth(line, w) : [line];
+    const hang = w > 0 ? diffLineHangWidth(line) : 0;
+    const chunks = w > 0 ? wrapToWidth(line, w, hang ? { hang } : undefined) : [line];
     for (const chunk of chunks) {
       const clean = String(chunk).replace(/[\r\n]/g, "");
       physical.push(clean.length ? clean : " ");
@@ -1097,6 +1115,36 @@ function formatMcpToolCallLines(displayName, o) {
 }
 
 /**
+ * @param {number} n
+ * @param {string} noun
+ * @returns {string}
+ */
+function pluralizeCount(n, noun) {
+  const c = Number(n) || 0;
+  return `${c} ${noun}${c === 1 ? "" : "s"}`;
+}
+
+/**
+ * Stock pi-cursor-sdk: `${prefix}${lineNumber} ${content}` (prefix is + / - / space).
+ * @param {unknown} hunk
+ * @returns {string[]}
+ */
+function formatEditHunkLines(hunk) {
+  if (!Array.isArray(hunk)) return [];
+  /** @type {string[]} */
+  const rows = [];
+  for (const raw of hunk) {
+    if (!raw || typeof raw !== "object") continue;
+    const row = /** @type {Record<string, unknown>} */ (raw);
+    const op = row.op === "+" || row.op === "-" ? row.op : " ";
+    const lineNo = typeof row.line === "number" && Number.isFinite(row.line) ? row.line : "";
+    const text = String(row.text ?? "").replace(/\t/g, "   ");
+    rows.push(`${op}${lineNo} ${text}`);
+  }
+  return rows;
+}
+
+/**
  * ping/write/edit/mkdir/delete results as short prose (SDK delete/write, not JSON).
  * @param {Record<string, unknown>} o
  * @returns {string}
@@ -1106,6 +1154,23 @@ function formatMutationToolResult(o) {
   if (o.pong === false) return "pong: false";
   const path = typeof o.path === "string" ? shortenHomePath(o.path) : "";
   if (!path) return "";
+  if (typeof o.replacements === "number") {
+    const added = typeof o.lines_added === "number" ? o.lines_added : null;
+    const removed = typeof o.lines_removed === "number" ? o.lines_removed : null;
+    let summary = "";
+    if (added != null || removed != null) {
+      const parts = [];
+      if (added) parts.push(`added ${pluralizeCount(added, "line")}`);
+      if (removed) parts.push(`removed ${pluralizeCount(removed, "line")}`);
+      summary = parts.length ? parts.join(", ") : "updated file";
+    } else {
+      const n = o.replacements;
+      const bytes = typeof o.bytes === "number" ? `, ${o.bytes} bytes` : "";
+      summary = `Edited ${path} (${n} replacement${n === 1 ? "" : "s"}${bytes})`;
+    }
+    const hunkLines = formatEditHunkLines(o.hunk);
+    return hunkLines.length ? `${summary}\n${hunkLines.join("\n")}` : summary;
+  }
   if (
     "content" in o ||
     "start_line" in o ||
@@ -1114,11 +1179,6 @@ function formatMutationToolResult(o) {
     "end_line" in o
   ) {
     return "";
-  }
-  if (typeof o.replacements === "number") {
-    const n = o.replacements;
-    const bytes = typeof o.bytes === "number" ? `, ${o.bytes} bytes` : "";
-    return `Edited ${path} (${n} replacement${n === 1 ? "" : "s"}${bytes})`;
   }
   if (typeof o.bytes === "number" && (o.created === true || o.overwritten === true)) {
     const verb = o.overwritten === true ? "Overwrote" : "Wrote";
@@ -1216,6 +1276,9 @@ function formatNativeToolCallLines(displayName, o) {
     let header = `mkdir ${homePath || "?"}`;
     if (o.parents === true) header += " (parents)";
     return [header];
+  }
+  if (displayName === "str_replace" || displayName === "edit") {
+    return [`edit ${homePath || "?"}`];
   }
   if (displayName === "delete_path" || displayName === "delete") {
     return [`delete ${homePath || "?"}`];
@@ -1360,21 +1423,19 @@ export function applyToolCallTheme(displayName, lines, theme) {
   const accent = (s) => theme.fg("accent", s);
   const out = (s) => theme.fg("toolOutput", s);
   const dim = (s) => theme.fg("dim", s);
-  const removed = (s) => {
-    const fg = theme.fg("toolDiffRemoved", s);
-    return typeof theme.bg === "function" ? theme.bg("toolErrorBg", fg) : fg;
-  };
-  const added = (s) => {
-    const fg = theme.fg("toolDiffAdded", s);
-    return typeof theme.bg === "function" ? theme.bg("toolSuccessBg", fg) : fg;
-  };
+  // Foreground only — panel already uses toolSuccessBg; extra bg made + vanish
+  // and - turn muddy brown (stock pi-cursor-sdk: toolDiffAdded/Removed/Context).
+  const removed = (s) => theme.fg("toolDiffRemoved", s);
+  const added = (s) => theme.fg("toolDiffAdded", s);
+  const ctx = (s) => theme.fg("toolDiffContext", s);
   const name = String(displayName || "");
-  /** @type {"header" | "rm" | "add" | "body"} */
+  /** @type {"header" | "rm" | "add" | "ctx" | "body"} */
   let mode = "header";
   return lines.map((line, index) => {
     const { body: s, suffix } = splitTimeoutSuffix(String(line ?? ""));
     const painted = (() => {
       if (/more lines/.test(s)) return dim(s);
+      if (/^(Took|Elapsed) /.test(s)) return dim(s);
       if (name === "grep" || name === "rg") {
         const m = s.match(/^(grep) (\/(?:\\\/|[^/])*\/)( in .*)$/);
         if (m) return `${title(m[1])} ${accent(m[2])}${out(m[3])}`;
@@ -1418,10 +1479,24 @@ export function applyToolCallTheme(displayName, lines, theme) {
         return out(s);
       }
       if (name === "str_replace" || name === "edit") {
-        if (index === 0) {
-          const m = s.match(/^(edit) (.*)$/);
-          if (m) return `${title(m[1])} ${accent(m[2])}`;
-          return title(s);
+        const header = s.match(/^(edit) (.*)$/);
+        if (header) return `${title(header[1])} ${accent(header[2])}`;
+        if (/^(added |removed |created |deleted |updated |Edited )/.test(s)) {
+          return theme.fg("success", s);
+        }
+        const numbered = s.match(/^([+\- ])(\d+) ([\s\S]*)$/);
+        if (numbered) {
+          const p = numbered[1];
+          if (p === "-") {
+            mode = "rm";
+            return removed(s);
+          }
+          if (p === "+") {
+            mode = "add";
+            return added(s);
+          }
+          mode = "ctx";
+          return ctx(s);
         }
         if (s.startsWith("- ")) {
           mode = "rm";
@@ -1433,7 +1508,8 @@ export function applyToolCallTheme(displayName, lines, theme) {
         }
         if (mode === "rm") return removed(s);
         if (mode === "add") return added(s);
-        return out(s);
+        if (mode === "ctx") return ctx(s);
+        return index === 0 ? title(s) : out(s);
       }
       if (name === "shell") {
         if (index === 0 && s.startsWith("$ ")) {
@@ -1493,21 +1569,9 @@ export function formatToolCallLines(displayName, args, opts = {}) {
       typeof o.path === "string" &&
       (typeof o.old_string === "string" || typeof o.oldString === "string")
     ) {
-      const oldS =
-        typeof o.old_string === "string" ? o.old_string : String(o.oldString ?? "");
-      const neu =
-        typeof o.new_string === "string"
-          ? o.new_string
-          : typeof o.newString === "string"
-            ? o.newString
-            : "";
-      const oldLines = oldS.split(LINE_BREAK_RE);
-      const newLines = neu.split(LINE_BREAK_RE);
-      logical = [
-        `${prefix}${o.path}`,
-        ...oldLines.map((p, i) => (i === 0 ? `- ${p}` : p)),
-        ...newLines.map((p, i) => (i === 0 ? `+ ${p}` : p)),
-      ];
+      // Call header is `edit path`. Numbered unified diff (+ context) is the
+      // tool result (stock pi-cursor-sdk: renderCall empty when complete).
+      logical = [`${prefix}${o.path}`];
     } else if (
       typeof o.path === "string" &&
       (typeof o.content === "string" || typeof o.contents === "string")

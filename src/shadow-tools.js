@@ -15,6 +15,7 @@ import {
 } from "./tool-display.js";
 import { takeToolResult, hasFollowUpText, hasToolResult } from "./result-stash.js";
 import {
+  applyToolCallTheme,
   formatToolCallLines,
   formatToolDurationLine,
   formatToolResult,
@@ -23,7 +24,7 @@ import {
   layoutToolPanelLines,
 } from "./bridge-client.js";
 import { truncateToWidth } from "./tui-width.js";
-import { MODEL_VALUE_SET } from "./config.js";
+import { MODEL_VALUE_SET, resolveToolCallLineLimits } from "./config.js";
 
 /** Loose JSON Schema — accepted by pi's typebox/json validator path. */
 const ANY_OBJECT = {
@@ -214,9 +215,15 @@ function makeShadowTool(displayName) {
         state.startedAt = Date.now();
       }
       const expanded = Boolean(context?.expanded);
+      const limits = resolveToolCallLineLimits();
       return panelLinesComponent(
         (width) =>
-          formatToolCallLines(displayName, args, { width, theme, expanded }),
+          formatToolCallLines(displayName, args, {
+            width,
+            theme,
+            expanded,
+            maxLines: expanded ? limits.expand : limits.preview,
+          }),
         { theme, precolored: true }
       );
     },
@@ -229,24 +236,38 @@ function makeShadowTool(displayName) {
         resolveToolDurationMs(result, context, options),
         { partial: Boolean(options?.isPartial) && !context?.isError },
       );
-      const color =
-        result?.isError || context?.isError ? "error" : "toolOutput";
+      const isError = Boolean(result?.isError || context?.isError);
+      const color = isError ? "error" : "toolOutput";
       const expanded = Boolean(options?.expanded);
+      const editLike =
+        displayName === "str_replace" || displayName === "edit";
       /** @param {string[]} rows */
       const withDuration = (rows) =>
         durationLine ? [...rows, durationLine] : rows;
-      if (!text) {
-        return panelLinesComponent(withDuration(durationLine ? [] : [""]), {
+      /** @param {string[]} rows */
+      const paint = (rows, maxLines) => {
+        if (editLike && !isError && theme) {
+          return panelLinesComponent(
+            (width) =>
+              applyToolCallTheme(
+                displayName,
+                layoutToolPanelLines(withDuration(rows), width, { maxLines }),
+                theme,
+              ),
+            { theme, precolored: true },
+          );
+        }
+        return panelLinesComponent(withDuration(rows), {
           theme,
           color,
+          maxLines,
         });
+      };
+      if (!text) {
+        return paint(durationLine ? [] : [""]);
       }
       if (expanded) {
-        return panelLinesComponent(withDuration(text.split(/\r?\n/)), {
-          theme,
-          color,
-          maxLines: 80,
-        });
+        return paint(text.split(/\r?\n/), 80);
       }
       const { lines: preview, skipped, fromStart } = previewToolResultLines(
         displayName,
@@ -258,9 +279,9 @@ function makeShadowTool(displayName) {
           ? `... (${skipped} more lines, Ctrl+O to expand)`
           : `... (${skipped} earlier lines, Ctrl+O to expand)`;
         const body = fromStart ? [...preview, hint] : [hint, ...preview];
-        return panelLinesComponent(withDuration(body), { theme, color });
+        return paint(body);
       }
-      return panelLinesComponent(withDuration(["", ...preview]), { theme, color });
+      return paint(editLike ? preview : ["", ...preview]);
     },
     async execute(toolCallId, _params, _signal, onUpdate, _ctx) {
       const execStarted = Date.now();

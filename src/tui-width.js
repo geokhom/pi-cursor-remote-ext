@@ -129,13 +129,24 @@ export function truncateToWidth(text, maxWidth, ellipsis = "…") {
 
 /**
  * Wrap one logical line (no CR/LF) to `width` columns.
+ * `hang` = leading columns to repeat as spaces on continuation rows
+ * (unified-diff `-78 ` / `+78 ` prefixes).
  * @param {string} line
  * @param {number} width
+ * @param {number} [hang]
  * @returns {string[]}
  */
-function wrapLineToWidth(line, width) {
+function wrapLineToWidth(line, width, hang = 0) {
   const s = String(line ?? "");
   if (!s) return [""];
+  const hangCols =
+    typeof hang === "number" && hang > 0 && hang < width ? hang : 0;
+  if (hangCols > 0 && s.length >= hangCols) {
+    const prefix = s.slice(0, hangCols);
+    const restRows = wrapLineToWidth(s.slice(hangCols), width - hangCols, 0);
+    const pad = " ".repeat(hangCols);
+    return restRows.map((row, i) => (i === 0 ? prefix + row : pad + row));
+  }
   /** @type {string[]} */
   const rows = [];
   let row = "";
@@ -194,15 +205,17 @@ function wrapLineToWidth(line, width) {
  * terminal lines without background). Iterative: a lone `\r` must not recurse.
  * @param {string} text
  * @param {number} width
+ * @param {{ hang?: number }} [opts]
  * @returns {string[]}
  */
-export function wrapToWidth(text, width) {
+export function wrapToWidth(text, width, opts = {}) {
+  const hang = typeof opts.hang === "number" && opts.hang > 0 ? opts.hang : 0;
   const parts = String(text ?? "").split(LINE_BREAK_RE);
   if (!(width > 0)) return parts.length ? parts : [""];
   /** @type {string[]} */
   const out = [];
   for (const part of parts) {
-    out.push(...wrapLineToWidth(part, width));
+    out.push(...wrapLineToWidth(part, width, hang));
   }
   return out.length ? out : [""];
 }

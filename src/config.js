@@ -19,6 +19,15 @@ export const THINKING_DISPLAY_DEFAULT = "indicator";
 export const WIRE_STATS_VALUES = new Set(["session", "request"]);
 export const WIRE_STATS_DEFAULT = "session";
 
+/** Collapsed tool-call arg preview (physical TUI rows), then Ctrl+O. */
+export const TOOL_CALL_PREVIEW_LINES_DEFAULT = 20;
+export const TOOL_CALL_PREVIEW_LINES_MIN = 3;
+export const TOOL_CALL_PREVIEW_LINES_MAX = 80;
+/** Expanded tool-call arg cap after Ctrl+O. */
+export const TOOL_CALL_EXPAND_LINES_DEFAULT = 200;
+export const TOOL_CALL_EXPAND_LINES_MIN = 20;
+export const TOOL_CALL_EXPAND_LINES_MAX = 500;
+
 /** Cursor SDK model ids (pre-catalog fallback; live list comes from bridge). */
 export const DEFAULT_MODEL = "composer-2.5";
 export const MODEL_VALUES = Object.freeze(["composer-2.5", "auto", "auto-smart"]);
@@ -60,6 +69,70 @@ export function coerceWireStats(raw) {
     if (v === "total" || v === "cumulative" || v === "cum") return "session";
   }
   return WIRE_STATS_DEFAULT;
+}
+
+/**
+ * @param {unknown} raw
+ * @param {number} fallback
+ * @param {number} min
+ * @param {number} max
+ * @returns {number}
+ */
+export function coerceLineCount(raw, fallback, min, max) {
+  const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+/**
+ * @param {unknown} rawTui
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {{ preview: number, expand: number }}
+ */
+export function coerceTuiToolCallLimits(rawTui, env = process.env) {
+  const tui = rawTui && typeof rawTui === "object" && !Array.isArray(rawTui) ? rawTui : {};
+  const preview = coerceLineCount(
+    env.BRIDGE_TOOL_CALL_PREVIEW_LINES ??
+      tui.toolCallPreviewLines ??
+      tui.tool_call_preview_lines,
+    TOOL_CALL_PREVIEW_LINES_DEFAULT,
+    TOOL_CALL_PREVIEW_LINES_MIN,
+    TOOL_CALL_PREVIEW_LINES_MAX
+  );
+  let expand = coerceLineCount(
+    env.BRIDGE_TOOL_CALL_EXPAND_LINES ??
+      tui.toolCallExpandLines ??
+      tui.tool_call_expand_lines,
+    TOOL_CALL_EXPAND_LINES_DEFAULT,
+    TOOL_CALL_EXPAND_LINES_MIN,
+    TOOL_CALL_EXPAND_LINES_MAX
+  );
+  if (expand < preview) expand = preview;
+  return { preview, expand };
+}
+
+/** @type {{ preview: number, expand: number } | null} */
+let _toolCallLineLimits = null;
+
+/**
+ * Session-cached TUI line caps from cursor-remote.json `tui` (restart pi to reload).
+ * @returns {{ preview: number, expand: number }}
+ */
+export function resolveToolCallLineLimits() {
+  if (_toolCallLineLimits) return _toolCallLineLimits;
+  let tui;
+  try {
+    tui = loadConfig()?.tui;
+  } catch {
+    tui = undefined;
+  }
+  _toolCallLineLimits = coerceTuiToolCallLimits(tui);
+  return _toolCallLineLimits;
+}
+
+/** @internal */
+export function resetToolCallLineLimitsCache() {
+  _toolCallLineLimits = null;
 }
 
 /**
@@ -110,6 +183,7 @@ export function defaultConfigPath() {
  *   thinkingDisplay: "off"|"indicator"|"full",
  *   wireStats: "session"|"request",
  *   model: string,
+ *   tui?: { toolCallPreviewLines?: number, toolCallExpandLines?: number },
  *   baseUrl: string,
  *   path: string,
  * } | null}
@@ -135,6 +209,7 @@ export function loadConfig(path) {
   const thinkingRaw =
     raw.thinkingDisplay !== undefined ? raw.thinkingDisplay : raw.thinking_display;
   const wireRaw = raw.wireStats !== undefined ? raw.wireStats : raw.wire_stats;
+  const tui = raw.tui && typeof raw.tui === "object" && !Array.isArray(raw.tui) ? raw.tui : {};
   return {
     relayUrl: String(raw.relayUrl || raw.relay_url || ""),
     bridgeToken: String(raw.bridgeToken || raw.bridge_token || ""),
@@ -145,6 +220,7 @@ export function loadConfig(path) {
     thinkingDisplay: coerceThinkingDisplay(thinkingRaw),
     wireStats: coerceWireStats(wireRaw),
     model: coerceModel(raw.model),
+    tui,
     httpProxy: String(proxy.http || raw.httpProxy || ""),
     httpsProxy: String(proxy.https || raw.httpsProxy || ""),
     noProxy: String(proxy.no || raw.noProxy || "127.0.0.1,localhost"),
@@ -162,6 +238,8 @@ export function loadConfig(path) {
  *   grants: string[],
  *   thinkingDisplay: "off"|"indicator"|"full",
  *   wireStats: "session"|"request",
+ *   toolCallPreviewLines: number,
+ *   toolCallExpandLines: number,
  *   configPath?: string,
  * }}
  */
@@ -184,6 +262,7 @@ export function resolveBridgeConnection() {
   const wireStats = coerceWireStats(
     process.env.BRIDGE_WIRE_STATS || cfg?.wireStats
   );
+  const tuiLimits = coerceTuiToolCallLimits(cfg?.tui);
   // env grants still applied via grantsFromEnv in runPromptViaBridge
   return {
     baseUrl,
@@ -192,6 +271,8 @@ export function resolveBridgeConnection() {
     grants,
     thinkingDisplay,
     wireStats,
+    toolCallPreviewLines: tuiLimits.preview,
+    toolCallExpandLines: tuiLimits.expand,
     configPath: cfg?.path,
   };
 }

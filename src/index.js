@@ -657,9 +657,13 @@ export {
   coerceThinkingDisplay,
   coerceWireStats,
   coerceModel,
+  coerceTuiToolCallLimits,
+  resolveToolCallLineLimits,
   DEFAULT_MODEL,
   MODEL_VALUES,
   MODEL_DISPLAY_NAMES,
+  TOOL_CALL_PREVIEW_LINES_DEFAULT,
+  TOOL_CALL_EXPAND_LINES_DEFAULT,
 } from "./config.js";
 export {
   bindThinkingUi,
