@@ -12,6 +12,34 @@ import { truncateToWidth, visibleWidth } from "./tui-width.js";
 import { advertisedContextWindow } from "./model-discovery.js";
 
 const STATE_KEY = Symbol.for("pi-cursor-remote.generation-speed.v1");
+const WIRE_KEY = Symbol.for("pi-cursor-remote.wire-stats.v1");
+
+/**
+ * Last proxy-visible byte counters (GET URL including base64 query + response body).
+ * @param {{ proxy_up_bytes?: number, proxy_down_bytes?: number, proxy_gets?: number, scope?: string } | null} stats
+ */
+export function rememberWireStats(stats) {
+  try {
+    globalThis[WIRE_KEY] = stats;
+  } catch {
+    // ignore
+  }
+}
+
+export function peekWireStats() {
+  try {
+    return globalThis[WIRE_KEY] || null;
+  } catch {
+    return null;
+  }
+}
+
+function formatProxyBytes(n) {
+  const v = Math.max(0, Number(n) || 0);
+  if (v < 1024) return `${Math.round(v)}B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(v < 10 * 1024 ? 1 : 0)}KiB`;
+  return `${(v / (1024 * 1024)).toFixed(2)}MiB`;
+}
 
 /**
  * @returns {{
@@ -335,6 +363,14 @@ function renderSpeedFooter(width, theme, footerData, ctx) {
       ? `${formatFooterTokens(contextWindow)} (auto)`
       : "? (auto)";
   statsParts.push(contextLabel);
+
+  const wire = peekWireStats();
+  if (wire && (Number(wire.proxy_up_bytes) > 0 || Number(wire.proxy_down_bytes) > 0)) {
+    const scope = wire.scope === "request" ? "run" : "session";
+    let proxy = `proxy(${scope}) ↑${formatProxyBytes(wire.proxy_up_bytes)} ↓${formatProxyBytes(wire.proxy_down_bytes)}`;
+    if (Number(wire.proxy_gets) > 0) proxy += ` ${Math.round(Number(wire.proxy_gets))} GET`;
+    statsParts.push(proxy);
+  }
 
   let statsLeft = statsParts.join(" ");
   const modelName = ctx.model?.id || "no-model";

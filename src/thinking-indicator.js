@@ -2,7 +2,7 @@
  * Pi UI helpers: thinking indicator widget + footer status (wire stats).
  */
 
-import { pokeTuiRender } from "./generation-speed.js";
+import { pokeTuiRender, rememberWireStats } from "./generation-speed.js";
 
 const WIDGET_ID = "cursor-remote-thinking";
 // Sorted with other extension statuses (localeCompare). "mcp" is pi-mcp-adapter.
@@ -154,6 +154,7 @@ export function formatBytes(n) {
  * }} stats
  */
 export function setWireStatus(stats) {
+  rememberWireStats(stats);
   if (!uiRef || typeof uiRef.setStatus !== "function") return;
   const up = formatBytes(stats.proxy_up_bytes ?? 0);
   const down = formatBytes(stats.proxy_down_bytes ?? 0);

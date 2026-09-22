@@ -24,7 +24,6 @@ import {
   showThinkingIndicator,
   clearThinkingIndicator,
   setWireStatus,
-  clearWireStatus,
   pokeUiKeepAlive,
 } from "./thinking-indicator.js";
 import {
@@ -1780,7 +1779,6 @@ export async function runPromptViaBridge(client, text, opts = {}) {
   clearToolResults();
   setFollowUp(null);
   clearThinkingIndicator();
-  clearWireStatus();
   const channel = opts.mode === "summarize" ? "summarize" : "coding";
   if (channel === "coding") {
     await waitWhileSummarizeBusy(client, opts.signal);
@@ -2074,15 +2072,24 @@ async function drainLiveRunTurn(opts = {}) {
   /** @param {object} ev */
   const applyWireStats = (ev) => {
     const useSession = wireStats === "session";
+    const pick = (...vals) => {
+      for (const v of vals) {
+        if (v === undefined || v === null || v === "") continue;
+        const n = Number(v);
+        if (Number.isFinite(n) && n >= 0) return n;
+      }
+      return null;
+    };
     const up = useSession
-      ? Number(ev.proxy_up_total) || Number(ev.proxy_up_bytes) || 0
-      : Number(ev.proxy_up_bytes) || 0;
+      ? pick(ev.proxy_up_total, ev.proxy_up_bytes)
+      : pick(ev.proxy_up_bytes);
     const down = useSession
-      ? Number(ev.proxy_down_total) || Number(ev.proxy_down_bytes) || 0
-      : Number(ev.proxy_down_bytes) || 0;
+      ? pick(ev.proxy_down_total, ev.proxy_down_bytes)
+      : pick(ev.proxy_down_bytes);
     const gets = useSession
-      ? Number(ev.proxy_gets_total) || Number(ev.proxy_gets) || 0
-      : Number(ev.proxy_gets) || 0;
+      ? pick(ev.proxy_gets_total, ev.proxy_gets)
+      : pick(ev.proxy_gets);
+    if (up == null && down == null) return;
     const durationMs = Number(ev.duration_ms) || 0;
     const chars = outChars();
     let cps = 0;
@@ -2094,9 +2101,9 @@ async function drainLiveRunTurn(opts = {}) {
     }
     setWireStatus({
       scope: wireStats,
-      proxy_up_bytes: up,
-      proxy_down_bytes: down,
-      proxy_gets: gets,
+      proxy_up_bytes: up ?? 0,
+      proxy_down_bytes: down ?? 0,
+      proxy_gets: gets ?? 0,
       chars_per_sec: cps,
       duration_ms: durationMs,
       out_chars: chars,

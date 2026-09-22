@@ -1,14 +1,13 @@
 /**
  * Map Cursor SDK TokenUsage (run_finished.usage) → pi-ai Usage fields.
- * Mirrors pi-cursor-sdk cursor-usage-accounting.ts:
- * - inputTokens is the full prompt; cache fields partition it when inside input
- * - reject usage for pi messages when input+output exceeds model.contextWindow
- *   (run-sum / multi-step aggregates must not drive footer fill% or auto-compact)
+ * The VPS admin total is this payload with no window cap. The TUI must keep
+ * the same numbers. Pi auto-compact stays off because the registered model
+ * contextWindow is inflated; do not drop a turn for exceeding the 256k label.
  */
 
-/** Sanity cap for clearly broken numbers when no contextWindow is set. */
-export const USAGE_SANITY_MAX = 2_000_000;
-export const OUTPUT_SANITY_MAX = 200_000;
+/** Reject only non-numeric / absurd counters, not a large real run. */
+export const USAGE_SANITY_MAX = 50_000_000;
+export const OUTPUT_SANITY_MAX = 5_000_000;
 
 /**
  * @typedef {{
@@ -16,6 +15,7 @@ export const OUTPUT_SANITY_MAX = 200_000;
  *   outputTokens: number,
  *   cacheReadTokens: number,
  *   cacheWriteTokens: number,
+ *   totalTokens?: number,
  * }} CursorSdkTurnUsage
  */
 
@@ -35,8 +35,15 @@ export function readCursorSdkTurnUsage(value) {
   const outputTokens = num("output_tokens", "outputTokens");
   const cacheReadTokens = num("cache_read_tokens", "cacheReadTokens") ?? 0;
   const cacheWriteTokens = num("cache_write_tokens", "cacheWriteTokens") ?? 0;
+  const totalTokens = num("total_tokens", "totalTokens");
   if (inputTokens === undefined || outputTokens === undefined) return undefined;
-  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+  };
 }
 
 /**
@@ -64,21 +71,17 @@ export function promptOccupancyTokens(turnUsage) {
 }
 
 /**
- * Partition + output bounds (pi-cursor-sdk isCursorSdkUsagePartitionSafe).
+ * Finite non-negative counters only. A million-token grok turn is valid.
  * @param {CursorSdkTurnUsage} turnUsage
- * @param {{ maxTokens?: number } | undefined} [model]
+ * @param {{ maxTokens?: number } | undefined} [_model]
  */
-export function isCursorSdkUsagePartitionSafe(turnUsage, model) {
-  // model.maxTokens on cursor-remote is the picker placeholder (8192), not the
-  // SDK output. A real grok/composer turn is often larger and was replaced
-  // by a chars/4 estimate in the TUI.
-  const maxOut = OUTPUT_SANITY_MAX;
-  void model;
+export function isCursorSdkUsagePartitionSafe(turnUsage, _model) {
   const counts = [
     turnUsage.inputTokens,
     turnUsage.outputTokens,
     turnUsage.cacheReadTokens,
     turnUsage.cacheWriteTokens,
+    turnUsage.totalTokens ?? 0,
   ];
   const uncached = getUncachedInput(turnUsage);
   return (
@@ -86,30 +89,18 @@ export function isCursorSdkUsagePartitionSafe(turnUsage, model) {
     Number.isFinite(uncached) &&
     uncached >= 0 &&
     uncached <= USAGE_SANITY_MAX &&
-    turnUsage.outputTokens <= maxOut
+    turnUsage.outputTokens <= OUTPUT_SANITY_MAX
   );
 }
 
 /**
- * Safe to attach to a pi assistant message / drive footer fill%.
- * Run-sum usage above contextWindow is rejected (Agent multi-step totals).
+ * Attach SDK usage to the pi message. The advertised context window is a
+ * label, not a reason to hide the bill.
  * @param {CursorSdkTurnUsage} turnUsage
  * @param {{ contextWindow?: number, maxTokens?: number } | undefined} [model]
  */
 export function isCursorSdkUsageSafeForPiMessage(turnUsage, model) {
-  if (!isCursorSdkUsagePartitionSafe(turnUsage, model)) return false;
-  const window = Number(model?.contextWindow) || 0;
-  if (window > 0) {
-    // The prompt may fill the window; output sits on top of it.
-    // input+output <= window dropped ordinary grok turns and the footer
-    // then showed a chars/4 stand-in. A sum many times the window is still
-    // a multi-step aggregate and stays rejected.
-    return (
-      promptOccupancyTokens(turnUsage) <= window &&
-      turnUsage.outputTokens <= OUTPUT_SANITY_MAX
-    );
-  }
-  return promptOccupancyTokens(turnUsage) <= USAGE_SANITY_MAX;
+  return isCursorSdkUsagePartitionSafe(turnUsage, model);
 }
 
 /**
@@ -121,10 +112,11 @@ export function applyCursorSdkUsage(partial, turnUsage) {
   partial.usage.output = turnUsage.outputTokens;
   partial.usage.cacheRead = turnUsage.cacheReadTokens;
   partial.usage.cacheWrite = turnUsage.cacheWriteTokens;
-  // Occupancy = full prompt + output (native: inputTokens + outputTokens when
-  // cache partitions input; our uncached+cache matches that shape).
+  const computed = promptOccupancyTokens(turnUsage) + turnUsage.outputTokens;
   partial.usage.totalTokens =
-    promptOccupancyTokens(turnUsage) + turnUsage.outputTokens;
+    typeof turnUsage.totalTokens === "number" && turnUsage.totalTokens > 0
+      ? turnUsage.totalTokens
+      : computed;
 }
 
 /**
