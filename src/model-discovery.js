@@ -293,12 +293,12 @@ function getContextValues(item) {
     .filter((v) => v && v !== "undefined");
 }
 
-const MAX_PICKER_MODELS = 96;
+const MAX_PICKER_MODELS = 160;
 
 /**
  * @param {object[]} items
  * @param {{ preferPiModelId?: string | null }} [options]
- * The picker stops at 96 entries. `preferPiModelId` is emitted first from the
+ * The picker stops at 160 entries. `preferPiModelId` is emitted first from the
  * real catalog item so a saved grok variant keeps its thinkingLevelMap
  * instead of a reasoning-less stub added after the cap.
  * @returns {object[]}
@@ -394,8 +394,22 @@ export function registerModelItems(items, options = {}) {
     const defaultParams = getDefaultParams(item);
     const contextValues = getContextValues(item);
     const contexts = contextValues.length > 0 ? contextValues : [undefined];
+    const hasFast = getParameter(item, "fast") !== undefined;
+    // One row per context window first (`:slow` when fast exists) so 500k is
+    // not dropped after the 256k fast/slow copies fill the cap.
+    for (const context of contexts) {
+      pushVariant(item, context, hasFast ? false : undefined, defaultParams);
+      if (configs.length >= MAX_PICKER_MODELS) return configs;
+    }
+  }
+
+  for (const item of sorted) {
+    if (!item || typeof item.id !== "string" || !item.id) continue;
+    const defaultParams = getDefaultParams(item);
+    const contextValues = getContextValues(item);
+    const contexts = contextValues.length > 0 ? contextValues : [undefined];
     const fastOverrides =
-      getParameter(item, "fast") === undefined ? [undefined] : [undefined, true, false];
+      getParameter(item, "fast") === undefined ? [] : [true, undefined];
 
     for (const context of contexts) {
       for (const fastOverride of fastOverrides) {
