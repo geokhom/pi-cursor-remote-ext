@@ -1,6 +1,8 @@
 /**
- * Auto POST /mcp/refresh when pi-mcp-adapter reports connected MCP tools.
+ * Auto POST /mcp/refresh when pi-mcp-adapter reports connected MCP tools,
+ * or when a server Pi disabled is still in the contour catalog.
  * Debounced; skips while a live Cursor Remote run is active; flushes on agent_end.
+ * Cached stdio status flaps do not reopen when hello already matches.
  */
 
 import { hasActiveLiveRun } from "./live-run.js";
@@ -26,8 +28,9 @@ export function mcpStatusFingerprint(snapshot) {
   return servers
     .map((s) => {
       if (!s || typeof s !== "object") return "";
-      const o = /** @type {{ name?: unknown, status?: unknown, toolCount?: unknown }} */ (s);
-      return `${String(o.name || "")}:${String(o.status || "")}:${Number(o.toolCount) || 0}`;
+      const o = /** @type {{ name?: unknown, status?: unknown, toolCount?: unknown, disabled?: unknown }} */ (s);
+      const flag = o.disabled === true ? "d" : "e";
+      return `${String(o.name || "")}:${String(o.status || "")}:${Number(o.toolCount) || 0}:${flag}`;
     })
     .filter(Boolean)
     .sort()
@@ -43,6 +46,36 @@ export function mcpStatusFingerprint(snapshot) {
  */
 export function mcpStatusHasTools(snapshot) {
   return mcpAdapterServersWithTools(snapshot).length > 0;
+}
+
+/**
+ * Server names Pi marked disabled (literal true only).
+ * @param {unknown} snapshot
+ * @returns {string[]}
+ */
+export function mcpDisabledServerNames(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return [];
+  const servers = /** @type {{ servers?: unknown }} */ (snapshot).servers;
+  if (!Array.isArray(servers)) return [];
+  const names = [];
+  for (const srv of servers) {
+    if (!srv || typeof srv !== "object") continue;
+    const o = /** @type {{ name?: unknown, disabled?: unknown }} */ (srv);
+    if (o.disabled !== true) continue;
+    const name = String(o.name || "").trim();
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * True when a status event should be considered for refresh.
+ * Disabled-only snapshots still count so `/mcp disable` can drop contour tools.
+ * @param {unknown} snapshot
+ * @returns {boolean}
+ */
+export function mcpStatusShouldSchedule(snapshot) {
+  return mcpStatusHasTools(snapshot) || mcpDisabledServerNames(snapshot).length > 0;
 }
 
 /**
@@ -100,6 +133,48 @@ export function mcpCatalogHasGap(adapterSnap, bridgeSnap) {
     }
   }
   return want.some((name) => !have.has(name));
+}
+
+/**
+ * True when contour still advertises or errors a server Pi has disabled.
+ * @param {unknown} adapterSnap
+ * @param {unknown} bridgeSnap
+ * @returns {boolean}
+ */
+export function mcpCatalogHasDisabledOverlap(adapterSnap, bridgeSnap) {
+  const disabled = new Set(mcpDisabledServerNames(adapterSnap));
+  if (!disabled.size) return false;
+  const tools = /** @type {{ tools?: Array<{ server?: string }> }} */ (bridgeSnap)?.tools;
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      if (t && typeof t.server === "string" && disabled.has(t.server.trim())) {
+        return true;
+      }
+    }
+  }
+  const errors = /** @type {{ errors?: Array<{ server?: string }> }} */ (bridgeSnap)?.errors;
+  if (Array.isArray(errors)) {
+    for (const e of errors) {
+      if (e && typeof e.server === "string" && disabled.has(e.server.trim())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Reopen when hello is missing an enabled server, or still has a disabled one.
+ * A cached chrome-devtools flap with a matching hello does not qualify.
+ * @param {unknown} adapterSnap
+ * @param {unknown} bridgeSnap
+ * @returns {boolean}
+ */
+export function mcpCatalogNeedsRefresh(adapterSnap, bridgeSnap) {
+  return (
+    mcpCatalogHasGap(adapterSnap, bridgeSnap) ||
+    mcpCatalogHasDisabledOverlap(adapterSnap, bridgeSnap)
+  );
 }
 
 /**
@@ -172,16 +247,20 @@ export function installMcpAutoRefresh(opts) {
         .filter(Boolean)
         .sort()
         .join(",");
-      const gap = mcpCatalogHasGap(lastAdapterSnap, before);
-      if (Array.isArray(before.errors) && before.errors.length && (gap || reason === "manual")) {
-        const detail = before.errors
+      const disabled = new Set(mcpDisabledServerNames(lastAdapterSnap));
+      const needs = mcpCatalogNeedsRefresh(lastAdapterSnap, before);
+      const visibleErrors = Array.isArray(before.errors)
+        ? before.errors.filter((e) => !disabled.has(String(e?.server || "").trim()))
+        : [];
+      if (visibleErrors.length && (needs || reason === "manual")) {
+        const detail = visibleErrors
           .map((e) => `${e?.server || "?"}: ${e?.error || "failed"}`)
           .join("; ");
         notify?.(`MCP catalog errors: ${detail}`, "warning");
       }
-      // Skip reopen when hello already has MCP tools *and* adapter servers are covered.
-      // Cached chrome-devtools must still refresh if it is missing from contour hello.
-      if (reason !== "manual" && beforeNames && !gap) {
+      // Skip reopen when hello already matches Pi: enabled servers present,
+      // disabled servers absent. Cached chrome-devtools flaps stay here.
+      if (reason !== "manual" && !needs) {
         lastSuccessFp = lastStatusFp;
         return;
       }
@@ -231,7 +310,7 @@ export function installMcpAutoRefresh(opts) {
   function schedule(reason, snapshot, force = false) {
     if (snapshot != null) {
       lastAdapterSnap = snapshot;
-      if (!mcpStatusHasTools(snapshot)) return;
+      if (!mcpStatusShouldSchedule(snapshot)) return;
       const fp = mcpStatusFingerprint(snapshot);
       if (!force && fp && fp === lastStatusFp) return;
       if (!force && fp && fp === lastSuccessFp) return;
