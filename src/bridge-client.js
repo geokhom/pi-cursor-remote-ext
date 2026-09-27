@@ -711,15 +711,8 @@ export function stripDecisionMark(line) {
 }
 
 export function paintDecisionLine(theme, text, kind) {
-  if (!theme || typeof theme.fg !== "function") return text;
-  if (kind === "warn") return theme.fg("warning", text);
-  let green = text;
-  try {
-    green = theme.fg("success", text);
-  } catch {
-    green = text;
-  }
-  if (green && green !== text) return green;
+  if (kind !== "warn") return `\x1b[32m${text}\x1b[39m`;
+  if (!theme || typeof theme.fg !== "function") return `\x1b[33m${text}\x1b[39m`;
   return theme.fg("warning", text);
 }
 
@@ -1753,13 +1746,22 @@ function formatShellResult(o) {
  */
 export function formatToolResult(content, ok = true, opts = {}) {
   const expandJson = opts.expandJson !== false;
+  const banner =
+    content != null && typeof content === "object" && !Array.isArray(content)
+      ? /** @type {{ decision_ui?: unknown }} */ (content).decision_ui
+      : null;
+  let bodySource = content;
+  if (banner && content != null && typeof content === "object" && !Array.isArray(content)) {
+    bodySource = { .../** @type {Record<string, unknown>} */ (content) };
+    delete bodySource.decision_ui;
+  }
   let body = "";
-  if (typeof content === "string") {
-    body = content;
-  } else if (Array.isArray(content)) {
-    body = formatUnknownList(content);
-  } else if (content != null && typeof content === "object") {
-    const o = /** @type {Record<string, unknown>} */ (content);
+  if (typeof bodySource === "string") {
+    body = bodySource;
+  } else if (Array.isArray(bodySource)) {
+    body = formatUnknownList(bodySource);
+  } else if (bodySource != null && typeof bodySource === "object") {
+    const o = /** @type {Record<string, unknown>} */ (bodySource);
     if (isShellShapedResult(o)) {
       body = formatShellResult(o);
     } else if (typeof o.error === "string" && o.error) {
@@ -1788,21 +1790,17 @@ export function formatToolResult(content, ok = true, opts = {}) {
             break;
           }
         }
-        if (!body) body = prettyJson(content);
+        if (!body) body = prettyJson(bodySource);
       }
     }
-  } else if (content != null) {
-    body = String(content);
+  } else if (bodySource != null) {
+    body = String(bodySource);
   }
-  if (expandJson && (typeof content === "string" || (body && !body.includes("\n")))) {
+  if (expandJson && (typeof bodySource === "string" || (body && !body.includes("\n")))) {
     body = maybeExpandJsonString(body, ok);
   }
   if (body.length > 4000) body = body.slice(0, 4000) + "\n…";
-  if (!ok && !body) body = "(failed)";
-  const banner =
-    content != null && typeof content === "object" && !Array.isArray(content)
-      ? /** @type {{ decision_ui?: unknown }} */ (content).decision_ui
-      : null;
+  if (!ok && !body && !banner) body = "(failed)";
   const note =
     banner
       ? ""
