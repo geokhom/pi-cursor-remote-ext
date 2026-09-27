@@ -690,6 +690,28 @@ export default async function register(pi) {
         }
       },
     });
+    pi.registerCommand("cursor-remote-decision", {
+      description: "Reload the decision model from the local decision server",
+      handler: async (_args, ctx) => {
+        if (!client) {
+          ctx?.ui?.notify?.("Bridge not configured; cannot reload the decision model.", "warning");
+          return;
+        }
+        try {
+          const out = await client.refreshDecision();
+          const name = out?.model ? String(out.model) : "";
+          ctx?.ui?.notify?.(
+            name ? `Decision model: ${name}` : "Decision model reloaded.",
+            "info"
+          );
+        } catch (err) {
+          ctx?.ui?.notify?.(
+            `Decision model reload failed: ${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      },
+    });
     pi.registerCommand("cursor-remote-web", {
       description: "Toggle VPS WebSearch/WebFetch (reopens session)",
       handler: async (args, ctx) => {

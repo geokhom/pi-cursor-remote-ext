@@ -285,6 +285,21 @@ export class BridgeClient {
   }
 
   /**
+   * POST /decision/refresh — re-read the loaded decision model from GET /v1/models.
+   */
+  async refreshDecision() {
+    const res = await this._request("POST", "/decision/refresh", "{}", {
+      "Content-Type": "application/json",
+    });
+    const json = JSON.parse(res.body || "{}");
+    if (res.statusCode !== 200) {
+      const detail = json.error ? String(json.error) : res.body;
+      throw new Error(`decision refresh HTTP ${res.statusCode}: ${detail}`);
+    }
+    return json;
+  }
+
+  /**
    * GET /mcp/tools — MCP tools currently advertised in hello.
    */
   async getMcpTools() {
