@@ -16,7 +16,9 @@ import {
 import { takeToolResult, hasFollowUpText, hasToolResult } from "./result-stash.js";
 import {
   applyToolCallTheme,
-  DECISION_NOTE_MARK,
+  decisionLineKind,
+  paintDecisionLine,
+  stripDecisionMark,
   formatToolCallLines,
   formatToolDurationLine,
   formatToolResult,
@@ -75,7 +77,7 @@ export function previewToolResultLines(displayName, text, expanded = false) {
   const notes = [];
   const rest = [];
   for (const line of lines) {
-    if (line.startsWith(DECISION_NOTE_MARK)) notes.push(line);
+    if (decisionLineKind(line)) notes.push(line);
     else rest.push(line);
   }
   const tail =
@@ -117,10 +119,10 @@ function panelLinesComponent(linesOrFn, style = {}) {
       });
       return rows.map((row) => {
         let styled = row;
-        const note = row.startsWith(DECISION_NOTE_MARK);
-        if (note) styled = row.slice(DECISION_NOTE_MARK.length);
-        if (style.theme && note) {
-          styled = style.theme.fg("warning", styled);
+        const kind = decisionLineKind(row);
+        if (kind) styled = stripDecisionMark(row);
+        if (style.theme && kind) {
+          styled = paintDecisionLine(style.theme, styled, kind);
         } else if (style.theme && isDurationFooter(row)) {
           styled = style.theme.fg("dim", row);
         } else if (!style.precolored && style.theme && style.color) {

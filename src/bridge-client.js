@@ -692,8 +692,51 @@ export function diffLineHangWidth(line) {
  * @param {{ maxLines?: number, expandHint?: boolean }} [opts]
  * @returns {string[]}
  */
-/** Leading mark so the TUI can paint a decision note in warning/yellow. */
+/** Leading marks so the TUI can paint a decision banner apart from tool output. */
 export const DECISION_NOTE_MARK = "\u001f";
+export const DECISION_OK_MARK = "\u001e";
+
+export function decisionLineKind(line) {
+  if (typeof line !== "string") return "";
+  if (line.startsWith(DECISION_NOTE_MARK)) return "warn";
+  if (line.startsWith(DECISION_OK_MARK)) return "ok";
+  return "";
+}
+
+export function stripDecisionMark(line) {
+  const kind = decisionLineKind(line);
+  if (kind === "warn") return line.slice(DECISION_NOTE_MARK.length);
+  if (kind === "ok") return line.slice(DECISION_OK_MARK.length);
+  return line;
+}
+
+export function paintDecisionLine(theme, text, kind) {
+  if (!theme || typeof theme.fg !== "function") return text;
+  if (kind === "warn") return theme.fg("warning", text);
+  let green = text;
+  try {
+    green = theme.fg("success", text);
+  } catch {
+    green = text;
+  }
+  if (green && green !== text) return green;
+  return theme.fg("warning", text);
+}
+
+function formatDecisionBanner(banner) {
+  const problem = Boolean(banner.problem);
+  const mark = problem ? DECISION_NOTE_MARK : DECISION_OK_MARK;
+  const lines = [
+    `decision(${banner.mode || "?"}): ${banner.summary || ""}`,
+    `result: ${banner.result === "fail" ? "fail" : "ok"}`,
+  ];
+  if (typeof banner.output === "string" && banner.output.trim()) {
+    const parts = banner.output.trim().split(/\r?\n/);
+    lines.push(`output: ${parts[0]}`);
+    for (const extra of parts.slice(1)) lines.push(extra);
+  }
+  return lines.map((line) => mark + line).join("\n");
+}
 
 export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   const src = Array.isArray(lines) ? lines : [lines];
@@ -708,14 +751,19 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   /** @type {string[]} */
   const physical = [];
   for (const line of logical) {
-    const note = line.startsWith(DECISION_NOTE_MARK);
-    const src = note ? line.slice(DECISION_NOTE_MARK.length) : line;
+    const kind = decisionLineKind(line);
+    const src = kind === "warn"
+      ? line.slice(DECISION_NOTE_MARK.length)
+      : kind === "ok"
+        ? line.slice(DECISION_OK_MARK.length)
+        : line;
     const hang = w > 0 ? diffLineHangWidth(src) : 0;
     const chunks = w > 0 ? wrapToWidth(src, w, hang ? { hang } : undefined) : [src];
     for (const chunk of chunks) {
       const clean = String(chunk).replace(/[\r\n]/g, "");
       const text = clean.length ? clean : " ";
-      physical.push(note ? DECISION_NOTE_MARK + text : text);
+      const mark = kind === "warn" ? DECISION_NOTE_MARK : kind === "ok" ? DECISION_OK_MARK : "";
+      physical.push(mark ? mark + text : text);
     }
   }
   if (!physical.length) physical.push(" ");
@@ -1454,8 +1502,8 @@ export function applyToolCallTheme(displayName, lines, theme) {
   return lines.map((line, index) => {
     const { body: s, suffix } = splitTimeoutSuffix(String(line ?? ""));
     const painted = (() => {
-      if (s.startsWith(DECISION_NOTE_MARK)) {
-        return theme.fg("warning", s.slice(DECISION_NOTE_MARK.length));
+      if (decisionLineKind(s)) {
+        return paintDecisionLine(theme, stripDecisionMark(s), decisionLineKind(s));
       }
       if (/more lines/.test(s)) return dim(s);
       if (/^(Took|Elapsed) /.test(s)) return dim(s);
@@ -1751,10 +1799,19 @@ export function formatToolResult(content, ok = true, opts = {}) {
   }
   if (body.length > 4000) body = body.slice(0, 4000) + "\n…";
   if (!ok && !body) body = "(failed)";
-  const note =
+  const banner =
     content != null && typeof content === "object" && !Array.isArray(content)
-      ? /** @type {{ decision_note?: unknown }} */ (content).decision_note
-      : "";
+      ? /** @type {{ decision_ui?: unknown }} */ (content).decision_ui
+      : null;
+  const note =
+    banner
+      ? ""
+      : content != null && typeof content === "object" && !Array.isArray(content)
+        ? /** @type {{ decision_note?: unknown }} */ (content).decision_note
+        : "";
+  if (banner && typeof banner === "object") {
+    body = body ? `${formatDecisionBanner(banner)}\n${body}` : formatDecisionBanner(banner);
+  }
   if (typeof note === "string" && note.trim()) {
     const marked = note
       .trim()
