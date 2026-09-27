@@ -16,6 +16,7 @@ import {
 import { takeToolResult, hasFollowUpText, hasToolResult } from "./result-stash.js";
 import {
   applyToolCallTheme,
+  DECISION_NOTE_MARK,
   formatToolCallLines,
   formatToolDurationLine,
   formatToolResult,
@@ -71,21 +72,27 @@ export function truncateToLastLines(text, maxLines) {
  */
 export function previewToolResultLines(displayName, text, expanded = false) {
   const lines = String(text ?? "").split(/\r\n|\n|\r/);
+  const notes = [];
+  const rest = [];
+  for (const line of lines) {
+    if (line.startsWith(DECISION_NOTE_MARK)) notes.push(line);
+    else rest.push(line);
+  }
   const tail =
     displayName === "shell" || displayName === "bash";
-  if (expanded) return { lines, skipped: 0, fromStart: !tail };
+  if (expanded) return { lines: [...notes, ...rest], skipped: 0, fromStart: !tail };
   const max = tail ? TOOL_PREVIEW_LINES_TAIL : TOOL_PREVIEW_LINES_HEAD;
-  if (lines.length <= max) return { lines, skipped: 0, fromStart: !tail };
+  if (rest.length <= max) return { lines: [...notes, ...rest], skipped: 0, fromStart: !tail };
   if (tail) {
     return {
-      lines: lines.slice(-max),
-      skipped: lines.length - max,
+      lines: [...notes, ...rest.slice(-max)],
+      skipped: rest.length - max,
       fromStart: false,
     };
   }
   return {
-    lines: lines.slice(0, max),
-    skipped: lines.length - max,
+    lines: [...notes, ...rest.slice(0, max)],
+    skipped: rest.length - max,
     fromStart: true,
   };
 }
@@ -110,7 +117,11 @@ function panelLinesComponent(linesOrFn, style = {}) {
       });
       return rows.map((row) => {
         let styled = row;
-        if (style.theme && isDurationFooter(row)) {
+        const note = row.startsWith(DECISION_NOTE_MARK);
+        if (note) styled = row.slice(DECISION_NOTE_MARK.length);
+        if (style.theme && note) {
+          styled = style.theme.fg("warning", styled);
+        } else if (style.theme && isDurationFooter(row)) {
           styled = style.theme.fg("dim", row);
         } else if (!style.precolored && style.theme && style.color) {
           styled = style.bold

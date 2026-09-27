@@ -692,6 +692,9 @@ export function diffLineHangWidth(line) {
  * @param {{ maxLines?: number, expandHint?: boolean }} [opts]
  * @returns {string[]}
  */
+/** Leading mark so the TUI can paint a decision note in warning/yellow. */
+export const DECISION_NOTE_MARK = "\u001f";
+
 export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   const src = Array.isArray(lines) ? lines : [lines];
   /** @type {string[]} */
@@ -705,11 +708,14 @@ export function layoutToolPanelLines(lines, width = 0, opts = {}) {
   /** @type {string[]} */
   const physical = [];
   for (const line of logical) {
-    const hang = w > 0 ? diffLineHangWidth(line) : 0;
-    const chunks = w > 0 ? wrapToWidth(line, w, hang ? { hang } : undefined) : [line];
+    const note = line.startsWith(DECISION_NOTE_MARK);
+    const src = note ? line.slice(DECISION_NOTE_MARK.length) : line;
+    const hang = w > 0 ? diffLineHangWidth(src) : 0;
+    const chunks = w > 0 ? wrapToWidth(src, w, hang ? { hang } : undefined) : [src];
     for (const chunk of chunks) {
       const clean = String(chunk).replace(/[\r\n]/g, "");
-      physical.push(clean.length ? clean : " ");
+      const text = clean.length ? clean : " ";
+      physical.push(note ? DECISION_NOTE_MARK + text : text);
     }
   }
   if (!physical.length) physical.push(" ");
@@ -1448,6 +1454,9 @@ export function applyToolCallTheme(displayName, lines, theme) {
   return lines.map((line, index) => {
     const { body: s, suffix } = splitTimeoutSuffix(String(line ?? ""));
     const painted = (() => {
+      if (s.startsWith(DECISION_NOTE_MARK)) {
+        return theme.fg("warning", s.slice(DECISION_NOTE_MARK.length));
+      }
       if (/more lines/.test(s)) return dim(s);
       if (/^(Took|Elapsed) /.test(s)) return dim(s);
       if (name === "grep" || name === "rg") {
@@ -1742,6 +1751,18 @@ export function formatToolResult(content, ok = true, opts = {}) {
   }
   if (body.length > 4000) body = body.slice(0, 4000) + "\n…";
   if (!ok && !body) body = "(failed)";
+  const note =
+    content != null && typeof content === "object" && !Array.isArray(content)
+      ? /** @type {{ decision_note?: unknown }} */ (content).decision_note
+      : "";
+  if (typeof note === "string" && note.trim()) {
+    const marked = note
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => DECISION_NOTE_MARK + line)
+      .join("\n");
+    body = body ? `${marked}\n${body}` : marked;
+  }
   return body;
 }
 
