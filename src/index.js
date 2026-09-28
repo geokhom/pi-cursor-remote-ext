@@ -690,7 +690,7 @@ export default async function register(pi) {
         }
       },
     });
-    pi.registerCommand("cursor-remote-decision", {
+    pi.registerCommand("decision-model-reload", {
       description: "Reload the decision model from the local decision server",
       handler: async (_args, ctx) => {
         if (!client) {
@@ -707,6 +707,39 @@ export default async function register(pi) {
         } catch (err) {
           ctx?.ui?.notify?.(
             `Decision model reload failed: ${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      },
+    });
+    pi.registerCommand("decision-mode", {
+      description: "Choose the local decision mode",
+      handler: async (_args, ctx) => {
+        if (!client) {
+          ctx?.ui?.notify?.("Bridge not configured; cannot change the decision mode.", "warning");
+          return;
+        }
+        const items = [
+          ["shadow", "только лог, вызов выполняется"],
+          ["annotate", "заметка в чате, вызов выполняется"],
+          ["review", "вердикт в чате, не выполнять только при оценке от 0.9"],
+        ];
+        try {
+          const cur = await client.getDecision();
+          const current = String(cur?.mode || "");
+          const lines = items.map(([id, comment]) => {
+            const mark = id === current ? "✓ " : "  ";
+            return `${mark}${id} — ${comment}`;
+          });
+          const picked = await ctx?.ui?.select?.("Decision mode", lines);
+          if (!picked) return;
+          const mode = items.find(([id]) => String(picked).includes(id))?.[0];
+          if (!mode || mode === current) return;
+          const out = await client.setDecisionMode(mode);
+          ctx?.ui?.notify?.(`Decision mode: ${out?.mode || mode}`, "info");
+        } catch (err) {
+          ctx?.ui?.notify?.(
+            `Decision mode failed: ${err instanceof Error ? err.message : String(err)}`,
             "error"
           );
         }

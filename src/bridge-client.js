@@ -285,6 +285,36 @@ export class BridgeClient {
   }
 
   /**
+   * GET /decision — current mode. Does not reload the model.
+   */
+  async getDecision() {
+    const res = await this._request("GET", "/decision", null, {});
+    const json = JSON.parse(res.body || "{}");
+    if (res.statusCode !== 200) {
+      const detail = json.error ? String(json.error) : res.body;
+      throw new Error(`decision GET HTTP ${res.statusCode}: ${detail}`);
+    }
+    return json;
+  }
+
+  /**
+   * POST /decision/mode — switch shadow / annotate / review without reopening.
+   * @param {string} mode
+   */
+  async setDecisionMode(mode) {
+    const body = JSON.stringify({ mode });
+    const res = await this._request("POST", "/decision/mode", body, {
+      "Content-Type": "application/json",
+    });
+    const json = JSON.parse(res.body || "{}");
+    if (res.statusCode !== 200) {
+      const detail = json.error ? String(json.error) : res.body;
+      throw new Error(`decision mode HTTP ${res.statusCode}: ${detail}`);
+    }
+    return json;
+  }
+
+  /**
    * POST /decision/refresh — re-read the loaded decision model from GET /v1/models.
    */
   async refreshDecision() {
