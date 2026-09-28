@@ -690,6 +690,45 @@ export default async function register(pi) {
         }
       },
     });
+    pi.registerCommand("decision", {
+      description: "Turn the local decision check on or off",
+      handler: async (_args, ctx) => {
+        if (!client) {
+          ctx?.ui?.notify?.("Bridge not configured; cannot change the decision check.", "warning");
+          return;
+        }
+        const items = [
+          [true, "on", "проверять вызовы"],
+          [false, "off", "не проверять, вызовы идут как есть"],
+        ];
+        try {
+          const cur = await client.getDecision();
+          const enabled = cur?.enabled === true;
+          const lines = items.map(([on, label, comment]) => {
+            const mark = on === enabled ? "✓ " : "  ";
+            return `${mark}${label} — ${comment}`;
+          });
+          const picked = await ctx?.ui?.select?.("Decision", lines);
+          if (!picked) return;
+          const choice = items.find(([, label]) => String(picked).includes(label));
+          if (!choice || choice[0] === enabled) return;
+          const out = await client.setDecisionEnabled(choice[0]);
+          if (choice[0] && out?.active === false) {
+            ctx?.ui?.notify?.(
+              "Decision on, but the check stays idle until url is set.",
+              "warning"
+            );
+            return;
+          }
+          ctx?.ui?.notify?.(`Decision ${out?.enabled ? "on" : "off"}`, "info");
+        } catch (err) {
+          ctx?.ui?.notify?.(
+            `Decision switch failed: ${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      },
+    });
     pi.registerCommand("decision-model-reload", {
       description: "Reload the decision model from the local decision server",
       handler: async (_args, ctx) => {

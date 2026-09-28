@@ -301,6 +301,23 @@ export class BridgeClient {
    * POST /decision/mode — switch shadow / annotate / review without reopening.
    * @param {string} mode
    */
+  /**
+   * POST /decision/enabled — turn the local check on or off without reopening.
+   * @param {boolean} enabled
+   */
+  async setDecisionEnabled(enabled) {
+    const body = JSON.stringify({ enabled: Boolean(enabled) });
+    const res = await this._request("POST", "/decision/enabled", body, {
+      "Content-Type": "application/json",
+    });
+    const json = JSON.parse(res.body || "{}");
+    if (res.statusCode !== 200) {
+      const detail = json.error ? String(json.error) : res.body;
+      throw new Error(`decision enabled HTTP ${res.statusCode}: ${detail}`);
+    }
+    return json;
+  }
+
   async setDecisionMode(mode) {
     const body = JSON.stringify({ mode });
     const res = await this._request("POST", "/decision/mode", body, {
