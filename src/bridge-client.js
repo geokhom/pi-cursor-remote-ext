@@ -1643,6 +1643,25 @@ export function applyToolCallTheme(displayName, lines, theme) {
 }
 
 /**
+ * Nested contour__code call. Local SSE only: its own panel, not a second model turn.
+ * @param {object | null | undefined} ev
+ * @returns {{ wireName: string, callId: string, args: Record<string, unknown>, parentId: string } | null}
+ */
+export function nestedToolCallFromExec(ev) {
+  if (!ev || ev.type !== "tool_executed") return null;
+  const parentId = typeof ev.parent_call_id === "string" ? ev.parent_call_id : "";
+  if (!parentId) return null;
+  const callId = typeof ev.call_id === "string" ? ev.call_id : "";
+  if (!callId || callId === parentId) return null;
+  const wireName = typeof ev.name === "string" && ev.name ? ev.name : "tool";
+  const args =
+    ev.arguments && typeof ev.arguments === "object" && !Array.isArray(ev.arguments)
+      ? ev.arguments
+      : {};
+  return { wireName, callId, args, parentId };
+}
+
+/**
  * Multi-line tool_call header for pi TUI (sed scripts, write_file body).
  * Wrap first, then theme, so wrapped argument rows keep accent (ANSI wrap
  * would otherwise leave only the first physical row colored).
@@ -1673,7 +1692,12 @@ export function formatToolCallLines(displayName, args, opts = {}) {
           ? "edit "
           : `$ ${displayName} `;
     const sqlBlock = firstNonEmptyString(o.sql, o.query, o.statement);
-    if (typeof o.command === "string") {
+    if (displayName === "code" && typeof o.source === "string") {
+      const parts = o.source.split(LINE_BREAK_RE);
+      logical = parts.length
+        ? parts.map((p, i) => (i === 0 ? `$ code ${p}` : p))
+        : ["$ code"];
+    } else if (typeof o.command === "string") {
       const parts = o.command.split(LINE_BREAK_RE);
       logical = parts.map((p, i) => (i === 0 ? `${prefix}${p}` : p));
     } else if (
@@ -2455,20 +2479,33 @@ async function drainLiveRunTurn(opts = {}) {
         ev.arguments && typeof ev.arguments === "object" ? ev.arguments : {};
       emitToolCall(wireName, callId, /** @type {Record<string, unknown>} */ (args));
     } else if (ev.type === "tool_executed") {
-      const callId = typeof ev.call_id === "string" ? ev.call_id : "";
-      const wireName = typeof ev.name === "string" ? ev.name : "";
-      const display = displayToolName(wireName || "tool");
-      const id =
-        callId ||
-        `exec-${Date.now().toString(36)}-${output.content.filter((c) => c.type === "toolCall").length}`;
-      trackCallId(display, id);
-      if (callId) pendingExec.delete(callId);
-      stashToolResult(id, {
-        ok: !isToolExecutionError(ev.ok, ev.content),
-        content: ev.content,
-        name: wireName || undefined,
-        displayName: display,
-      });
+      const nested = nestedToolCallFromExec(ev);
+      if (nested) {
+        emitToolCall(nested.wireName, nested.callId, nested.args);
+        const display = displayToolName(nested.wireName);
+        stashToolResult(nested.callId, {
+          ok: !isToolExecutionError(ev.ok, ev.content),
+          content: ev.content,
+          name: nested.wireName,
+          displayName: display,
+        });
+        pendingExec.delete(nested.callId);
+      } else {
+        const callId = typeof ev.call_id === "string" ? ev.call_id : "";
+        const wireName = typeof ev.name === "string" ? ev.name : "";
+        const display = displayToolName(wireName || "tool");
+        const id =
+          callId ||
+          `exec-${Date.now().toString(36)}-${output.content.filter((c) => c.type === "toolCall").length}`;
+        trackCallId(display, id);
+        if (callId) pendingExec.delete(callId);
+        stashToolResult(id, {
+          ok: !isToolExecutionError(ev.ok, ev.content),
+          content: ev.content,
+          name: wireName || undefined,
+          displayName: display,
+        });
+      }
     } else if (ev.type === "run_finished") {
       endThinkingBlock();
       notifyIndicator(false);

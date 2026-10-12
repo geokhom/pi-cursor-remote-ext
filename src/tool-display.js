@@ -18,6 +18,7 @@ export const CONTOUR_WIRE_TOOLS = Object.freeze([
   "contour__mkdir",
   "contour__delete_path",
   "contour__shell",
+  "contour__code",
 ]);
 
 /** Extra MCP wire names from bridge GET /mcp/tools (session-scoped). */

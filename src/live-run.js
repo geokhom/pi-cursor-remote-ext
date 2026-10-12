@@ -419,8 +419,10 @@ export function startLiveEventFeeder(
               const id = typeof ev.call_id === "string" ? ev.call_id : "";
               if (id) session.awaitingToolExec.add(id);
             } else if (ev.type === "tool_executed") {
+              const parentId =
+                typeof ev.parent_call_id === "string" ? ev.parent_call_id : "";
               const id = typeof ev.call_id === "string" ? ev.call_id : "";
-              if (id) session.awaitingToolExec.delete(id);
+              if (id && id !== parentId) session.awaitingToolExec.delete(id);
             } else if (ev.type === "run_started") {
               session.sawRunFinished = false;
               session.fifoPending = false;
