@@ -1628,6 +1628,16 @@ export function applyToolCallTheme(displayName, lines, theme) {
         }
         return accent(s);
       }
+      if (name === "code") {
+        if (index === 0 && s.startsWith("$ code")) {
+          const rest = s.slice("$ code".length);
+          if (rest.startsWith(" ")) {
+            return `${title("$ code")} ${accent(rest.slice(1))}`;
+          }
+          return title("$ code");
+        }
+        return accent(s);
+      }
       if (name.startsWith("mcp__") || name.includes("mcp__")) {
         if (index === 0) {
           const sp = s.indexOf(" ");
