@@ -5,7 +5,7 @@
 #     https://raw.githubusercontent.com/geokhom/pi-cursor-remote-ext/main/install.sh | bash
 #
 # Env:
-#   PI_CURSOR_REMOTE_VERSION  — pin (e.g. 0.1.19); default = latest GitHub Release, else 0.1.19
+#   PI_CURSOR_REMOTE_VERSION  — pin; default = latest GitHub Release, else DEFAULT_VERSION
 #   http_proxy / https_proxy  — corp proxy (curl picks these up; -x in the one-liner is optional)
 #   PI_AGENT_DIR              — default ~/.pi/agent
 set -euo pipefail
@@ -13,7 +13,7 @@ set -euo pipefail
 REPO="geokhom/pi-cursor-remote-ext"
 PKG_NAME="pi-cursor-remote"
 NPM_SPEC="npm:${PKG_NAME}"
-DEFAULT_VERSION="0.15.2"
+DEFAULT_VERSION="0.15.4"
 AGENT_DIR="${PI_AGENT_DIR:-${HOME}/.pi/agent}"
 NPM_PREFIX="${AGENT_DIR}/npm"
 SETTINGS="${AGENT_DIR}/settings.json"
