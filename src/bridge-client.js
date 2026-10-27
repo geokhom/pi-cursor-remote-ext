@@ -49,24 +49,66 @@ import { recordDecodeSample } from "./generation-speed.js";
 import { sleepAbortable } from "./sse-reconnect.js";
 
 /**
+ * Script of one letter: Cyrillic vs Latin vs other. Digits and punctuation are null.
+ * @param {string} ch
+ * @returns {"cyr" | "lat" | "other" | null}
+ */
+function letterScript(ch) {
+  if (!ch) return null;
+  const c = ch.codePointAt(0);
+  if (
+    (c >= 0x0400 && c <= 0x052f) ||
+    (c >= 0x2de0 && c <= 0x2dff) ||
+    (c >= 0xa640 && c <= 0xa69f)
+  ) {
+    return "cyr";
+  }
+  if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)) return "lat";
+  if (/\p{L}/u.test(ch)) return "other";
+  return null;
+}
+
+/**
  * True when a thinking-chunk boundary needs an inserted space.
- * Keeps dotted ASCII identifiers (`zbx.t_foo`) and `foo(` tight.
+ * Subword pieces (`integrat` + `ion`) and ident punctuation stay tight.
+ * A space is inserted only when the stream omitted one: script change,
+ * clause punctuation, em dash, or a capital that starts the next word.
  * @param {string} left
  * @param {string} right
  */
 export function thinkingJoinNeedsSpace(left, right) {
   if (!left || !right) return false;
   if (/\s$/.test(left) || /^\s/.test(right)) return false;
-  if (/^[,.;:!?%)\]}…»]/.test(right)) return false;
-  if (/^\(/.test(right)) return false;
-  if (/[(\[{]$/.test(left)) return false;
-  if (/_$/.test(left) || /^_/.test(right)) return false;
+  const l1 = left[left.length - 1];
+  const r0 = right[0];
+  if (/^[,.;:!?%)\]}…»]/.test(r0)) return false;
+  if (r0 === "(") return false;
+  if (/[(\[{«]$/.test(l1)) return false;
+  if (l1 === "_" || r0 === "_" || l1 === "-" || r0 === "-" || l1 === "/" || r0 === "/") {
+    return false;
+  }
   // Dotted ident continuation (zbx.t_foo); still space before a new sentence (Message. Verifying).
-  if (/\.$/.test(left) && /^[a-z0-9_]/.test(right)) return false;
-  return (
-    /[\p{L}\p{N}.,:;!?%…»"'\)\]—–/-]$/u.test(left) &&
-    /^[\p{L}\p{N}«"'`—–/-]/u.test(right)
-  );
+  if (l1 === "." && /^[a-z0-9_]/.test(r0)) return false;
+  if (l1 === "—" || l1 === "–" || r0 === "—" || r0 === "–") return true;
+  const ls = letterScript(l1);
+  if (/^[«"'`]/.test(r0) && ls) return true;
+  const rs = letterScript(r0);
+  if (ls && rs && ls !== rs) return true;
+  if (/[,;:!?%…»)\]"']/.test(l1) && rs) return true;
+  if (l1 === "." && (rs === "cyr" || (rs && r0 === r0.toUpperCase() && r0 !== r0.toLowerCase()))) {
+    return true;
+  }
+  if (
+    ls &&
+    rs &&
+    l1 === l1.toLowerCase() &&
+    l1 !== l1.toUpperCase() &&
+    r0 === r0.toUpperCase() &&
+    r0 !== r0.toLowerCase()
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -91,8 +133,9 @@ function joinThinkingBoundary(buf, suffix) {
 
 /**
  * Join thinking chunks into flowing prose (SDK often sends short lines / CR).
- * Incremental tokens, space-only chunks, and cumulative snapshots that omit
- * a space at the new boundary (`rules` + `rulesс` → `rules с`) are glued here.
+ * Subword tokens are concatenated (`integrat` + `ion`). A space is inserted
+ * only at a real word boundary, including a cumulative snapshot that omitted
+ * one (`rules` + `rulesс` → `rules с`). Space-only chunks are kept.
  * @param {string} buf
  * @param {string} chunk
  */
@@ -2200,6 +2243,8 @@ async function drainLiveRunTurn(opts = {}) {
   /** @type {number | null} */
   let thinkingIndex = null;
   let thinkingBuf = "";
+  /** Last raw thinking chunk, so an immediate short replay is not glued twice. */
+  let thinkingPiece = "";
   let toolsThisTurn = 0;
   /** @type {Set<string>} */
   const pendingExec = new Set();
@@ -2292,6 +2337,7 @@ async function drainLiveRunTurn(opts = {}) {
     });
     thinkingIndex = null;
     thinkingBuf = "";
+    thinkingPiece = "";
   };
 
   const endTextBlock = () => {
@@ -2309,6 +2355,8 @@ async function drainLiveRunTurn(opts = {}) {
   /** @param {string} chunk */
   const appendThinking = (chunk) => {
     if (!chunk || thinkingDisplay !== "full") return;
+    if (chunk === thinkingPiece) return;
+    thinkingPiece = chunk;
     if (thinkingIndex == null) {
       endTextBlock();
       thinkingIndex = output.content.length;
@@ -2460,6 +2508,7 @@ async function drainLiveRunTurn(opts = {}) {
         endTextBlock();
         thinkingIndex = output.content.length;
         thinkingBuf = "";
+        thinkingPiece = "";
         output.content.push({ type: "thinking", thinking: "" });
         stream.push({
           type: "thinking_start",
