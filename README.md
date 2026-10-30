@@ -23,7 +23,7 @@ curl -fsSL -x "$http_proxy" \
 Опции:
 
 ```bash
-PI_CURSOR_REMOTE_VERSION=0.17.0 bash  # пин версии (иначе latest Release, fallback 0.17.0)
+PI_CURSOR_REMOTE_VERSION=0.17.1 bash  # пин версии (иначе latest Release, fallback 0.17.1)
 # http_proxy / https_proxy — как обычно для curl
 ```
 
@@ -48,7 +48,7 @@ pi install -l ./pi-cursor-remote
 То же, что делает `install.sh`:
 
 ```bash
-VER=0.17.0
+VER=0.17.1
 TGZ="pi-cursor-remote-${VER}.tgz"
 curl -fsSL -x "$http_proxy" -o "/tmp/${TGZ}" \
   "https://github.com/geokhom/pi-cursor-remote-ext/releases/download/v${VER}/${TGZ}"

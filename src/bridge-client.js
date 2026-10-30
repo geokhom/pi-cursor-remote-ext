@@ -87,17 +87,16 @@ export function thinkingJoinNeedsSpace(left, right) {
   if (l1 === "_" || r0 === "_" || l1 === "-" || r0 === "-" || l1 === "/" || r0 === "/") {
     return false;
   }
-  // Dotted ident continuation (zbx.t_foo); still space before a new sentence (Message. Verifying).
-  if (l1 === "." && /^[a-z0-9_]/.test(r0)) return false;
+  // A token boundary after a dot cannot distinguish SQL/member access from a
+  // sentence. Never invent a gap based on case/script; thought boundaries are
+  // handled separately and source whitespace is retained.
+  if (l1 === ".") return false;
   if (l1 === "—" || l1 === "–" || r0 === "—" || r0 === "–") return true;
   const ls = letterScript(l1);
   if (/^[«"'`]/.test(r0) && ls) return true;
   const rs = letterScript(r0);
   if (ls && rs && ls !== rs) return true;
   if (/[,;:!?%…»)\]"']/.test(l1) && rs) return true;
-  if (l1 === "." && (rs === "cyr" || (rs && r0 === r0.toUpperCase() && r0 !== r0.toLowerCase()))) {
-    return true;
-  }
   if (
     ls &&
     rs &&
@@ -115,7 +114,7 @@ export function thinkingJoinNeedsSpace(left, right) {
  * @param {string} buf
  * @param {string} suffix
  */
-function joinThinkingBoundary(buf, suffix) {
+function joinThinkingBoundary(buf, suffix, thought = false) {
   if (!suffix) return buf;
   const rest = suffix.replace(/^[ \t]+/, "");
   if (!rest) {
@@ -127,6 +126,9 @@ function joinThinkingBoundary(buf, suffix) {
     return `${buf} ${rest}`;
   }
   if (/\s$/.test(buf)) return buf + rest;
+  if (thought && /[\p{L}\p{N}.]$/u.test(buf) && /^[\p{L}\p{N}]/u.test(rest)) {
+    return `${buf} ${rest}`;
+  }
   if (thinkingJoinNeedsSpace(buf, rest)) return `${buf} ${rest}`;
   return buf + rest;
 }
@@ -138,8 +140,9 @@ function joinThinkingBoundary(buf, suffix) {
  * one (`rules` + `rulesс` → `rules с`). Space-only chunks are kept.
  * @param {string} buf
  * @param {string} chunk
+ * @param {{ thought?: boolean }} [options] Explicit boundary between thoughts, not token deltas.
  */
-export function joinThinkingChunk(buf, chunk) {
+export function joinThinkingChunk(buf, chunk, { thought = false } = {}) {
   if (!chunk) return buf || "";
   let c = String(chunk).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   // Soft line wraps → spaces; keep rare blank-line paragraph breaks
@@ -154,7 +157,7 @@ export function joinThinkingChunk(buf, chunk) {
     return joinThinkingBoundary(bufRtrim, c.slice(bufRtrim.length));
   }
   if (c === buf || (c.length >= 4 && buf.endsWith(c))) return buf;
-  return joinThinkingBoundary(buf, c);
+  return joinThinkingBoundary(buf, c, thought);
 }
 
 /**
@@ -2252,6 +2255,7 @@ async function drainLiveRunTurn(opts = {}) {
   let thinkingBuf = "";
   /** Last raw thinking chunk, so an immediate short replay is not glued twice. */
   let thinkingPiece = "";
+  let thinkingBoundary = false;
   let toolsThisTurn = 0;
   /** @type {Set<string>} */
   const pendingExec = new Set();
@@ -2345,6 +2349,7 @@ async function drainLiveRunTurn(opts = {}) {
     thinkingIndex = null;
     thinkingBuf = "";
     thinkingPiece = "";
+    thinkingBoundary = false;
   };
 
   const endTextBlock = () => {
@@ -2376,7 +2381,8 @@ async function drainLiveRunTurn(opts = {}) {
       });
     }
     const before = thinkingBuf;
-    thinkingBuf = joinThinkingChunk(thinkingBuf, chunk);
+    thinkingBuf = joinThinkingChunk(thinkingBuf, chunk, { thought: thinkingBoundary });
+    thinkingBoundary = false;
     const delta = thinkingBuf.slice(before.length);
     if (!delta) return;
     output.content[thinkingIndex].thinking = thinkingBuf;
@@ -2516,6 +2522,7 @@ async function drainLiveRunTurn(opts = {}) {
         thinkingIndex = output.content.length;
         thinkingBuf = "";
         thinkingPiece = "";
+        thinkingBoundary = false;
         output.content.push({ type: "thinking", thinking: "" });
         stream.push({
           type: "thinking_start",
@@ -2527,6 +2534,7 @@ async function drainLiveRunTurn(opts = {}) {
       appendThinking(ev.text);
     } else if (ev.type === "thinking_end") {
       // Soft end — coalesce consecutive SDK thoughts into one block.
+      thinkingBoundary = true;
     } else if (ev.type === "assistant_delta" && typeof ev.text === "string") {
       appendText(ev.text);
     } else if (ev.type === "assistant_message" && typeof ev.text === "string") {
