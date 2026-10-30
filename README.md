@@ -23,11 +23,15 @@ curl -fsSL -x "$http_proxy" \
 Опции:
 
 ```bash
-PI_CURSOR_REMOTE_VERSION=0.16.16 bash  # пин версии (иначе latest Release, fallback 0.16.16)
+PI_CURSOR_REMOTE_VERSION=0.17.0 bash  # пин версии (иначе latest Release, fallback 0.17.0)
 # http_proxy / https_proxy — как обычно для curl
 ```
 
 Обновление: тот же one-liner (или с новым `PI_CURSOR_REMOTE_VERSION`).
+
+**0.17:** обновить также contour bridge и VPS relay до 0.17.x. Resumable upload
+продолжает тот же run после сбоя и меняет представление блокируемого пакета,
+не повторяя prompt или выполненный tool. Одного обновления Pi-пакета недостаточно.
 
 ### A. From contour-bridge zip / local tree (no network)
 
@@ -44,7 +48,7 @@ pi install -l ./pi-cursor-remote
 То же, что делает `install.sh`:
 
 ```bash
-VER=0.16.16
+VER=0.17.0
 TGZ="pi-cursor-remote-${VER}.tgz"
 curl -fsSL -x "$http_proxy" -o "/tmp/${TGZ}" \
   "https://github.com/geokhom/pi-cursor-remote-ext/releases/download/v${VER}/${TGZ}"
