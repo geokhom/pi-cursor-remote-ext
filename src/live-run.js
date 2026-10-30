@@ -46,6 +46,7 @@ export const TOOL_BATCH_SETTLE_MS = 75;
  * @property {() => void} markFirstOut
  * @property {() => void} [bumpIdle]
  * @property {boolean} [abandoned] bridge idle (or /stop) tore down this feeder
+ * @property {boolean} [reconnecting] reconnect owns terminal catch-up before idle cleanup
  * @property {boolean} [fifoPending] a follow-up is queued behind the current run
  * @property {boolean} [drainBusy] drainLiveRunTurn currently owns this slot
  * @property {Array<() => void>} [drainWaiters]
@@ -278,6 +279,7 @@ export function startLiveEventFeeder(
     firstOutAt: null,
     decodeSampleRecorded: false,
     abandoned: false,
+    reconnecting: false,
     channel: wantedChannel,
     abort,
     timer: null,
@@ -303,7 +305,9 @@ export function startLiveEventFeeder(
       if (session.firstOutAt == null) session.firstOutAt = Date.now();
     },
     enqueue(ev) {
-      if (ev && typeof ev === "object") session.bumpIdle();
+      // A synthetic retry is not proof of liveness. Otherwise an unavailable
+      // bridge resets the idle timer forever on its own reconnect notices.
+      if (ev && typeof ev === "object" && ev.type !== "sse_reconnect") session.bumpIdle();
       session.queue.push(ev);
       const waiters = session.waiters.splice(0);
       for (const w of waiters) w();
@@ -360,16 +364,22 @@ export function startLiveEventFeeder(
       if (typeof client.getSession !== "function") continue;
       try {
         const snap = await client.getSession();
+        if (abort.signal.aborted || session.closed) return;
         if (wantedChannel === "summarize") {
           if (snap?.summarize_active) {
             sawBridgeRun = true;
+            session.bumpIdle();
             continue;
           }
         } else if (sessionIsBusy(snap)) {
           sawBridgeRun = true;
+          session.bumpIdle();
           continue;
         }
         if (!snap || snap.ok === false) continue;
+        // The terminal may already be in the bridge's replay buffer. Do not
+        // abandon the slot while the SSE reconnect is about to read it.
+        if (session.reconnecting) continue;
         // Do not kill the feeder in the gap before POST /prompt sets run_active.
         if (!sawBridgeRun) continue;
         session.abandoned = true;
@@ -388,6 +398,7 @@ export function startLiveEventFeeder(
   (async () => {
     let after = 0;
     let attempt = 0;
+    let idleCatchupAttempted = false;
     try {
       while (!abort.signal.aborted && !session.closed) {
         try {
@@ -401,8 +412,10 @@ export function startLiveEventFeeder(
               after = ev.sse_seq;
             }
             if (!shouldAcceptSseEvent(ev, wantedChannel)) continue;
+            session.reconnecting = false;
             gotEvent = true;
             attempt = 0;
+            idleCatchupAttempted = false;
             session.bumpIdle();
             if (ev.type !== "sse_reconnect") sawBridgeRun = true;
             if (ev.type === "run_heartbeat") {
@@ -471,17 +484,48 @@ export function startLiveEventFeeder(
           if (abort.signal.aborted || session.closed) {
             return;
           }
-          if (!isReconnectableSseError(err) || attempt >= SSE_RECONNECT_MAX) {
+          if (!isReconnectableSseError(err)) {
             session.error =
               err instanceof Error ? err : new Error(String(err ?? "sse error"));
             return;
+          }
+          session.reconnecting = true;
+          let extended = false;
+          if (attempt >= SSE_RECONNECT_MAX) {
+            let snap;
+            try {
+              snap = await client.getSession();
+            } catch {
+              // An unreachable bridge is unknown, not a confirmed run terminal.
+              // Keep trying within the existing idle deadline, without bumping it.
+            }
+            if (abort.signal.aborted || session.closed) return;
+            const known = snap && snap.ok !== false;
+            const busy = known && (wantedChannel === "summarize"
+              ? Boolean(snap.summarize_active) : sessionIsBusy(snap));
+            if (busy) {
+              sawBridgeRun = true;
+              session.bumpIdle();
+              extended = true;
+            } else if (!known && sawBridgeRun) {
+              extended = true;
+            } else if (known && sawBridgeRun && !idleCatchupAttempted) {
+              // One last replay attempt when the run just ended during outage.
+              idleCatchupAttempted = true;
+              extended = true;
+            } else {
+              session.error = err instanceof Error ? err : new Error(String(err ?? "sse error"));
+              return;
+            }
           }
           attempt += 1;
           session.enqueue({
             type: "sse_reconnect",
             attempt,
-            max_attempts: SSE_RECONNECT_MAX,
-            message: `[wire] SSE reconnecting (${attempt}/${SSE_RECONNECT_MAX})…`,
+            max_attempts: extended ? null : SSE_RECONNECT_MAX,
+            message: extended
+              ? `[wire] SSE reconnecting (${attempt}); preserving the bridge run/replay…`
+              : `[wire] SSE reconnecting (${attempt}/${SSE_RECONNECT_MAX})…`,
           });
           await sleepAbortable(sseReconnectDelayMs(attempt), abort.signal);
         }

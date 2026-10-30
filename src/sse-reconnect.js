@@ -30,6 +30,7 @@ export function isReconnectableSseError(err, userSignal) {
     return true;
   }
   const t = msg.trim();
+  if (/^events HTTP (?:408|425|429|5\d\d)\b/i.test(t)) return true;
   if (/^(aborted|socket hang up|read ECONNRESET|write EPIPE)$/i.test(t)) {
     return true;
   }
@@ -60,16 +61,14 @@ export function sleepAbortable(ms, signal) {
       resolve();
       return;
     }
-    const t = setTimeout(resolve, ms);
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
     if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(t);
-          resolve();
-        },
-        { once: true }
-      );
+      signal.addEventListener("abort", done, { once: true });
     }
   });
 }

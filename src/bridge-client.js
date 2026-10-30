@@ -294,7 +294,8 @@ export class BridgeClient {
    * GET /session — current cwd + ready flag.
    */
   async getSession() {
-    const res = await this._request("GET", "/session", null, {});
+    // Liveness probes must not hang a reconnect loop or stale feeder forever.
+    const res = await this._request("GET", "/session", null, {}, 3000);
     if (res.statusCode !== 200) {
       throw new Error(`session GET HTTP ${res.statusCode}: ${res.body}`);
     }
@@ -558,7 +559,7 @@ export class BridgeClient {
     return h;
   }
 
-  _request(method, path, body, headers) {
+  _request(method, path, body, headers, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const opts = {
         method,
@@ -584,6 +585,7 @@ export class BridgeClient {
       }
       const req = reqFn(opts, (res) => {
         const chunks = [];
+        res.on("error", reject);
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
           resolve({
@@ -593,6 +595,14 @@ export class BridgeClient {
         });
       });
       req.on("error", reject);
+      if (timeoutMs > 0) {
+        const timer = setTimeout(() => {
+          const error = new Error(`${path} request timed out`);
+          error.code = "ETIMEDOUT";
+          req.destroy(error);
+        }, timeoutMs);
+        req.once("close", () => clearTimeout(timer));
+      }
       if (body) req.write(body);
       req.end();
     });
@@ -627,6 +637,7 @@ export class BridgeClient {
       const req = reqFn(reqOpts, (res) => {
         if ((res.statusCode || 0) >= 400) {
           const chunks = [];
+          res.on("error", reject);
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => {
             const body = Buffer.concat(chunks).toString("utf8").slice(0, 200);
@@ -650,13 +661,9 @@ export class BridgeClient {
           reject(new Error("aborted"));
           return;
         }
-        signal.addEventListener(
-          "abort",
-          () => {
-            req.destroy();
-          },
-          { once: true }
-        );
+        const onAbort = () => req.destroy();
+        signal.addEventListener("abort", onAbort, { once: true });
+        req.once("close", () => signal.removeEventListener("abort", onAbort));
       }
       req.end();
     });

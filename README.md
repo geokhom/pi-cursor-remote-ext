@@ -23,7 +23,7 @@ curl -fsSL -x "$http_proxy" \
 Опции:
 
 ```bash
-PI_CURSOR_REMOTE_VERSION=0.1.26 bash   # пин версии (иначе latest Release, fallback 0.1.26)
+PI_CURSOR_REMOTE_VERSION=0.16.16 bash  # пин версии (иначе latest Release, fallback 0.16.16)
 # http_proxy / https_proxy — как обычно для curl
 ```
 
@@ -44,7 +44,7 @@ pi install -l ./pi-cursor-remote
 То же, что делает `install.sh`:
 
 ```bash
-VER=0.1.26
+VER=0.16.16
 TGZ="pi-cursor-remote-${VER}.tgz"
 curl -fsSL -x "$http_proxy" -o "/tmp/${TGZ}" \
   "https://github.com/geokhom/pi-cursor-remote-ext/releases/download/v${VER}/${TGZ}"
@@ -80,3 +80,18 @@ Also needed: running bridge + `~/.pi/agent/cursor-remote.json` (see contour-brid
 pi                # select model "Cursor Remote"
 # ESC or /stop / /cancel stops the Cursor run on the VPS (not only TUI output)
 ```
+
+### Connection recovery
+
+SSE drops and transient HTTP 5xx/429 responses reconnect without sending the
+prompt again or cancelling the VPS run. Reconnect continues beyond the initial
+eight attempts while the bridge reports active work; a temporarily unreachable
+bridge remains subject to the idle deadline. The terminal is read from replay
+even if the run finishes during the outage. Authentication failures stay visible.
+
+With bridge **0.16.15+**, an ambiguous upload blocks only further uploads while
+text/heartbeat/terminal continue on the existing sid. The `[wire]` receive-only
+notice is not a run error. New prompts/tools are blocked because tool results and
+cancel cannot be uploaded; a tool on the VPS may time out. Real run errors,
+session loss and loss of liveness still end the turn. Update both the contour
+bridge and this Pi package for the complete behavior; no VPS update is required.
